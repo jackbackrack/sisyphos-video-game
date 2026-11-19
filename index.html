@@ -1,0 +1,1422 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sisyphus</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #120d18; overflow: hidden; font-family: Georgia, serif; color: #f3e6cf; }
+  canvas { display: block; }
+  .box { position: absolute; background: rgba(20,12,20,0.55); border-radius: 10px; padding: 10px 14px; }
+  #info { top: 16px; left: 16px; min-width: 200px; }
+  #info b { font-size: 18px; }
+  #info div { font-size: 13px; color: #cdbca3; margin-top: 4px; }
+  #slopeBox { top: 16px; left: 50%; transform: translateX(-50%); width: min(380px, 42vw); text-align: center; }
+  #progBox { top: 16px; right: 16px; width: 200px; }
+  .lbl, .row { font-size: 12px; font-weight: bold; }
+  .row { display: flex; justify-content: space-between; }
+  .track { position: relative; height: 14px; background: #2a1c22; border-radius: 7px; margin-top: 6px; overflow: hidden; }
+  .track.thin { height: 6px; }
+  #sfill, #pfill { height: 100%; border-radius: 7px; width: 0; }
+  #sdanger { position: absolute; top: 0; bottom: 0; right: 0; background: rgba(224,86,63,0.25); }
+  #pfill { background: #c59a6a; }
+  .tick { position: absolute; top: -2px; bottom: -2px; width: 3px; background: #ff6a4a; }
+  #ahead { position: absolute; top: 0; bottom: 0; width: 3px; background: #fff; opacity: 0.9; }
+  .legend { font-size: 11px; color: #cdbca3; margin-top: 4px; }
+  #hint { position: absolute; bottom: 12px; width: 100%; text-align: center; font-size: 12px; color: rgba(255,240,220,0.85); text-shadow: 0 1px 2px #000; }
+  #overlay { position: absolute; inset: 0; display: none; align-items: center; justify-content: center; background: rgba(10,6,14,0.45); }
+  #panel { background: rgba(34,22,30,0.95); border: 2px solid #c59a6a; border-radius: 16px; padding: 28px 36px; max-width: 600px; text-align: center; }
+  #panel h1 { margin: 0 0 6px; font-size: 46px; letter-spacing: 2px; }
+  #panel h2 { margin: 0 0 12px; font-size: 36px; }
+  #panel p { margin: 6px 0; font-size: 16px; color: #e9dcc8; }
+  #panel .sub { font-style: italic; color: #cdbca3; }
+  #panel .small { font-size: 14px; color: #cdbca3; }
+  #panel .go { margin-top: 18px; font-weight: bold; font-size: 18px; animation: blink 1s steps(2) infinite; }
+  #panel kbd { display: inline-block; min-width: 18px; padding: 1px 6px; border: 1px solid #8a7a66; border-radius: 4px; background: #2a1c22; font-family: inherit; font-size: 13px; }
+  @keyframes blink { 50% { color: #ffdf6b; } }
+  #flash { position: absolute; inset: 0; background: #c81e14; opacity: 0; pointer-events: none; }
+</style>
+</head>
+<body>
+<div id="hud">
+  <div id="info" class="box"><b id="lvl">Level 1</b><div id="stats"></div><div id="alt"></div></div>
+  <div id="slopeBox" class="box"><div class="lbl" id="slbl">SLOPE</div>
+    <div class="track"><div id="sdanger"></div><div id="sfill"></div><div class="tick" id="stick"></div><div id="ahead"></div></div>
+    <div class="legend">bar = under the boulder · white line = just ahead · red = too steep</div></div>
+  <div id="progBox" class="box"><div class="row"><span>Progress to summit</span><span id="ppct">0%</span></div>
+    <div class="row" style="margin-top:6px"><span>Summit</span><span id="compass" style="display:inline-block;font-size:20px;line-height:16px;font-family:sans-serif;color:#ffdf6b">&#x2191;</span></div>
+    <div class="track thin"><div id="pfill"></div></div></div>
+  <div id="hint">W forward · S back · A D sidestep · Q E (or ← →) turn · push the boulder the way you face · SPACE jump · SHIFT duck · T steep-ground tint · P pause</div>
+</div>
+<div id="flash"></div>
+<div id="overlay"><div id="panel"></div></div>
+<script src="vendor/three.min.js"></script>
+<script>
+"use strict";
+
+// ---------------------------------------------------------------------------
+// Tunables. The simulation runs in "units" on the ground plane (x, z) with
+// height y. K converts units to 3D world meters. The peak is at x = z = 0.
+// ---------------------------------------------------------------------------
+const K = 1 / 30;
+const R = 38;              // boulder radius
+const PW = 11;             // player radius
+const PH = 54;             // player height
+const TOP = 60;            // radius of the small rounded top where the boulder can rest
+const VERT = 2.2;          // the mountain is drawn this much steeper than the gameplay slope
+const FACET = 40;          // approximate size of the mountain's facets
+const G = 220;             // gravity for the rolling boulder
+const ROLL_FRICTION = 30;
+const PUSH_SPEED = 95;
+const WALK_FWD = 150, WALK_BACK = 170, STRAFE = 140;
+const STEER = 2.2;         // how fast (rad/s) you swing around the boulder to push it a new way
+const TURN = 2.0;          // how fast (rad/s) Q / E turn you
+const SIDE_DRIFT = 22;     // how much a cross-slope pushes the boulder sideways while you push
+const JUMP_V = 440, JUMP_G = 1000;
+const DUCK_TIME = 0.25;    // a duck only lasts this long...
+const DUCK_COOLDOWN = 0.6; // ...and can't be spammed
+const IMPACT_WINDOW = 0.12;// after a slipping boulder hits you, this long to duck before you're crushed
+const XMIN = -600;
+const DEG = 180 / Math.PI;
+
+const LIMIT = 40;           // the steepest ground (in degrees) the boulder can be pushed on
+function levelCfg(n) {
+  const f = Math.min(1, (n - 1) / 9);   // 0 on level 1 .. 1 by level 10
+  return {
+    n,
+    length: 1400 + 500 * (n - 1),                    // distance up the slope from the foot to the top
+    bands: Math.min(9, 1 + n),                       // rings of cliffs between the ledges
+    ledgeLo: 12, ledgeHi: lerp(24, 30, f),           // ledge steepness at the bottom / top
+    cliffLo: 56, cliffHi: lerp(62, 70, f),           // cliff steepness at the bottom / top
+    bandLo: 40, bandHi: lerp(60, 85, f),             // cliff band height (in distance up the slope)
+    shoulder: 0.15,                                  // how much gentler/steeper the sides of the mountain are
+    twist: 1.6,                                      // how the gentle sides wind around the mountain
+    bumps: 2,                                        // small unevenness
+    roadDeg: lerp(27, 31, f),                        // steepness of a good ramp
+    camberDeg: lerp(3, 7, f),                        // how much a ramp tilts toward its drop-off
+    roadHalf: lerp(70, 56, f),                       // half a ramp's width
+    good: n <= 2 ? 0.45 : lerp(0.35, 0.2, f),        // chance a ramp that isn't the guaranteed one also goes
+    spin: n % 2 ? 1 : -1,
+    maxRoll: 80 + 8 * (n - 1),
+    seed: n * 977 + 13,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Utilities
+// ---------------------------------------------------------------------------
+function mulberry(a) {
+  return function () {
+    a |= 0; a = (a + 0x6D2B79F5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+function hash2(a, b) { const x = Math.sin(a * 12.9898 + b * 78.233) * 43758.5453; return x - Math.floor(x); }
+const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+const lerp = (a, b, t) => a + (b - a) * t;
+const smooth = t => { t = clamp(t, 0, 1); return t * t * (3 - 2 * t); };
+const store = {
+  get(k, d) { try { const v = localStorage.getItem(k); return v === null ? d : JSON.parse(v); } catch (e) { return d; } },
+  set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) {} },
+};
+
+// ---------------------------------------------------------------------------
+// Audio
+// ---------------------------------------------------------------------------
+let AC = null;
+function audio() {
+  if (!AC) { try { AC = new (window.AudioContext || window.webkitAudioContext)(); } catch (e) {} }
+  if (AC && AC.state === "suspended") AC.resume();
+}
+function tone(freq, dur, type = "sine", vol = 0.12, slideTo = null, delay = 0) {
+  const ac = AC; if (!ac) return;
+  const t0 = ac.currentTime + delay;
+  const o = ac.createOscillator(), g = ac.createGain();
+  o.type = type; o.frequency.setValueAtTime(freq, t0);
+  if (slideTo) o.frequency.exponentialRampToValueAtTime(slideTo, t0 + dur);
+  g.gain.setValueAtTime(vol, t0);
+  g.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
+  o.connect(g).connect(ac.destination);
+  o.start(t0); o.stop(t0 + dur + 0.02);
+}
+function noise(dur, vol = 0.3, freq = 400, delay = 0) {
+  const ac = AC; if (!ac) return;
+  const len = Math.floor(ac.sampleRate * dur);
+  const buf = ac.createBuffer(1, len, ac.sampleRate);
+  const d = buf.getChannelData(0);
+  for (let i = 0; i < len; i++) d[i] = (Math.random() * 2 - 1) * (1 - i / len);
+  const src = ac.createBufferSource(); src.buffer = buf;
+  const f = ac.createBiquadFilter(); f.type = "lowpass"; f.frequency.value = freq;
+  const g = ac.createGain(); g.gain.value = vol;
+  src.connect(f).connect(g).connect(ac.destination);
+  src.start(ac.currentTime + delay);
+}
+const sfx = {
+  crush() { noise(0.6, 0.6, 300); tone(90, 0.5, "sawtooth", 0.2, 30);
+            for (let i = 0; i < 5; i++) noise(0.05, 0.5, 2500, 0.03 + i * 0.045); },
+  splat() { noise(0.4, 0.45, 600, 0.05); tone(160, 0.3, "sine", 0.15, 50, 0.05); },
+  creak() { tone(70, 0.4, "sawtooth", 0.06, 55); },
+  lurch() { noise(0.35, 0.5, 220); },
+  catch() { noise(0.15, 0.25, 250); },
+  jump() { tone(300, 0.15, "sine", 0.06, 500); },
+  duck() { tone(500, 0.08, "sine", 0.05, 250); },
+  win() { [392, 494, 587, 784].forEach((f, i) => tone(f, 0.5, "triangle", 0.12, null, i * 0.13)); },
+};
+
+// ---------------------------------------------------------------------------
+// The mountain: a radial profile that gets steeper the higher you go, plus
+// ridges, gullies and uneven ground, so some facets are shallow and some steep.
+// ---------------------------------------------------------------------------
+let profile, profileN, rFoot, mapS, nP;
+let BANDS = [];
+function buildMountain(cfg) {
+  rFoot = cfg.length + TOP;
+  mapS = Math.round(rFoot * (1 + 1.2 * cfg.shoulder) + 600);
+  profileN = cfg.length + 1400 - XMIN;
+  profile = new Float32Array(profileN + 2);
+  const r = mulberry(cfg.seed);
+  nP = Array.from({ length: 8 }, () => r() * 6.28);
+  // Rings of cliffs, closer together and taller toward the top
+  BANDS = [];
+  for (let k = 0; k < cfg.bands; k++) {
+    const f = (k + 0.5) / cfg.bands;
+    const c = cfg.length * (0.2 + 0.68 * Math.pow(f, 0.85));
+    const W = lerp(cfg.bandLo, cfg.bandHi, f) * (0.9 + 0.2 * r());
+    BANDS.push({ lo: c - W / 2, hi: c + W / 2, tan: Math.tan(lerp(cfg.cliffLo, cfg.cliffHi, f) / DEG) });
+  }
+  let h = 0;
+  for (let i = 0; i <= profileN + 1; i++) {
+    const u = i + XMIN;   // distance up the slope from the foot
+    let s = 0;
+    if (u > 0 && u < cfg.length) {
+      const t = u / cfg.length;
+      let tan = Math.tan(lerp(cfg.ledgeLo, cfg.ledgeHi, t) / DEG);   // ledges get steeper as you climb
+      for (const b of BANDS) {
+        const m = smooth((u - b.lo) / 8 + 0.5) * smooth((b.hi - u) / 8 + 0.5);
+        if (m > 0) tan = lerp(tan, b.tan, m);
+      }
+      s = tan / VERT * smooth(u / 150) * smooth((cfg.length - u) / 40);
+    }
+    profile[i] = h; h += s;
+  }
+}
+function profileAt(u) {
+  let i = u - XMIN;
+  if (i < 0) i = 0;
+  if (i > profileN) i = profileN;
+  const i0 = Math.floor(i), t = i - i0;
+  return profile[i0] * (1 - t) + profile[i0 + 1] * t;
+}
+// Smooth mountain shape; the faceted mesh is built from it
+// Some sides of the mountain are stretched into gentler shoulders, others are
+// steeper faces, and the gentle sides twist around the peak as you climb.
+function stretch(th, r) {
+  const w = r / rFoot, fade = smooth(w / 0.22);
+  return fade * cfg.shoulder * Math.sin(2 * th + nP[0] + w * cfg.twist) + fade * 0.2 * cfg.shoulder * Math.sin(3 * th + nP[1] - w * cfg.twist * 1.4);
+}
+function uAt(x, z) {
+  const r = Math.sqrt(x * x + z * z);
+  return rFoot - r / (1 + stretch(Math.atan2(z, x), r));
+}
+function hNatural(x, z) {
+  const r = Math.sqrt(x * x + z * z);
+  let h = profileAt(uAt(x, z));
+  const onSlope = smooth((r - TOP) / 250) * smooth((rFoot + 150 - r) / 400);
+  // uneven ground: patches that are shallower or steeper than the mountain around them
+  h += cfg.bumps * onSlope * (
+    Math.sin(x * 0.011 + z * 0.004 + nP[2]) * Math.sin(z * 0.013 - x * 0.005 + nP[3]) +
+    0.5 * Math.sin(x * 0.023 + nP[4]) * Math.sin(z * 0.019 + nP[5]));
+  // rolling foothills
+  const fh = smooth((r - rFoot + 100) / 500);
+  h += fh * 22 * Math.sin(x * 0.0035 + nP[6]) * Math.sin(z * 0.0042 + nP[7]);
+  return h * VERT;
+}
+function hBase(x, z) { return profileAt(uAt(x, z)) * VERT; }   // smooth, without bumps
+
+// ---------------------------------------------------------------------------
+// Ramps: ledges cut diagonally across each band of cliffs. Every band has
+// several, and from a distance they all look climbable, but most hide a crux:
+// a short stretch that is just too steep, a spot where the ledge pinches out,
+// or a ramp that simply stops below the top. At least one per band goes.
+// ---------------------------------------------------------------------------
+const ROAD_BANK = 45;   // width of the steep bank on each side of a ramp
+let ROAD = null;
+function posAt(th, u) {   // the point at angle th that is u up the slope
+  const cx = Math.cos(th), cz = Math.sin(th);
+  let lo = 0, hi = mapS - 50;
+  for (let i = 0; i < 40; i++) { const m = (lo + hi) / 2; if (uAt(cx * m, cz * m) > u) lo = m; else hi = m; }
+  return [cx * lo, cz * lo];
+}
+function buildTrails(rng) {
+  const tanT = Math.tan(cfg.roadDeg / DEG), tanC = Math.tan(cfg.camberDeg / DEG);
+  const tanA0 = Math.sqrt(tanT * tanT - tanC * tanC);      // grade along a ramp
+  const tanCrux = Math.tan((LIMIT + 9) / DEG);              // a too-steep stretch
+  const xs = [], zs = [], ys = [], lx = [], lz = [], cam = [], hw = [], tid = [];
+  const trails = [];
+  const e = 4;
+  const slopeAt = (x, z) => Math.hypot(hBase(x + e, z) - hBase(x - e, z), hBase(x, z + e) - hBase(x, z - e)) / (2 * e);
+  function march(x, z, spin, stopU, kind, cruxU, forceU) {
+    const id = trails.length, start = xs.length;
+    let CL = kind === "steep" ? 100 : 200;
+    let tanStart = Math.tan((LIMIT + (kind === "steep" ? 10 : 5)) / DEG);
+    let crux = -1, pdx = 0, pdz = 0;
+    const ds = 8;
+    for (let it = 0; it < 2000; it++) {
+      const gx = (hBase(x + e, z) - hBase(x - e, z)) / (2 * e), gz = (hBase(x, z + e) - hBase(x, z - e)) / (2 * e);
+      const u = uAt(x, z);
+      if (kind && crux < 0 && u >= cruxU && slopeAt(x, z) > tanStart) { if (kind === "end") break; crux = 0; }
+      // no good spot for it yet: wash the ramp out before it reaches the top
+      if (kind && crux < 0 && u >= forceU) { kind = "pinch"; CL = 200; crux = 0; }
+      const inCrux = crux >= 0 && crux < CL;
+      const tanA = inCrux && kind === "steep" ? tanCrux : tanA0;
+      let ux = -x, uz = -z;
+      if (Math.hypot(gx, gz) > 1e-5) { ux = gx; uz = gz; }
+      const ul = Math.hypot(ux, uz) || 1; ux /= ul; uz /= ul;
+      // look ahead up the slope, so the ramp is already angled across when the cliff starts
+      const S = inCrux ? slopeAt(x, z) : Math.max(slopeAt(x, z), slopeAt(x + ux * 40, z + uz * 40), slopeAt(x + ux * 80, z + uz * 80));
+      let dx = ux, dz = uz;
+      if (S > tanA) {                     // too steep to go straight up: traverse
+        const ph = Math.acos(tanA / S) * spin;
+        dx = ux * Math.cos(ph) - uz * Math.sin(ph); dz = ux * Math.sin(ph) + uz * Math.cos(ph);
+      }
+      // turn gently so the ramp has no sharp corners
+      if (it > 0) {
+        const turn = Math.atan2(pdx * dz - pdz * dx, pdx * dx + pdz * dz), mt = 0.025 * ds;
+        if (Math.abs(turn) > mt) { const a = Math.atan2(pdz, pdx) + Math.sign(turn) * mt; dx = Math.cos(a); dz = Math.sin(a); }
+      }
+      pdx = dx; pdz = dz;
+      const gl = Math.hypot(gx, gz);
+      let lxv = -dz, lzv = dx;            // sideways, pointing toward the drop-off
+      if (lxv * gx + lzv * gz > 0) { lxv = -lxv; lzv = -lzv; }
+      const across = gl > 1e-5 ? Math.abs(lxv * gx + lzv * gz) / gl : 0;
+      let w = cfg.roadHalf;
+      if (inCrux && kind === "pinch") w = lerp(cfg.roadHalf, -ROAD_BANK, smooth(Math.min(crux, CL - crux) / 40));   // washed out
+      xs.push(x); zs.push(z); ys.push(hNatural(x, z)); lx.push(lxv); lz.push(lzv);
+      // tilt like the ground does where that's gentle enough (so a ramp blends into a
+      // ledge), but no more than keeps the ramp pushable where it crosses the cliff
+      const along = gl * Math.sqrt(Math.max(0, 1 - across * across));
+      cam.push(inCrux ? 0 : Math.min(gl * across, Math.max(tanC * across, Math.sqrt(Math.max(0, tanT * tanT - along * along)))));
+      hw.push(w); tid.push(id);
+      if (crux >= 0) crux += ds;
+      if (u >= stopU) break;
+      x += dx * ds; z += dz * ds;
+    }
+    trails.push({ start, end: xs.length, kind });
+  }
+  const span = 2 * (cfg.roadHalf + ROAD_BANK) + 60;
+  BANDS.forEach((b, k) => {
+    const spin = (k % 2 ? -1 : 1) * cfg.spin;              // zig-zag: alternate bands wind opposite ways
+    const rMid = rFoot - (b.lo + b.hi) / 2;
+    const reach = (b.hi - b.lo) * b.tan / tanA0;           // how far a ramp travels sideways
+    let count = clamp(Math.floor(2 * Math.PI * rMid / 650), 3, 7);
+    while (count > 2 && 2 * Math.PI * rMid / count < reach + span) count--;
+    const sure = Math.floor(rng() * count);                 // the one that's sure to go
+    const th0 = rng() * Math.PI * 2;
+    const plans = [];
+    for (let i = 0; i < count; i++) {
+      const th = th0 + (i + (rng() - 0.5) * 0.2) * Math.PI * 2 / count;
+      let kind = null;
+      if (i !== sure && rng() > cfg.good) { const q = rng(); kind = q < 0.4 ? "steep" : q < 0.8 ? "pinch" : "end"; }
+      plans.push({ th, kind, cruxU: lerp(b.lo, b.hi, 0.3 + rng() * 0.4), sure: i === sure });
+    }
+    plans.sort((p, q) => q.sure - p.sure);                 // the sure one first; others must keep clear of it
+    const mine = [], clear = 2 * (cfg.roadHalf + ROAD_BANK) + 20;
+    for (const pl of plans) {
+      const [x, z] = posAt(pl.th, b.lo - cfg.roadHalf - 20);
+      march(x, z, spin, b.hi + cfg.roadHalf + 30, pl.kind, pl.cruxU, b.hi - (b.hi - b.lo) * 0.3);
+      const T = trails[trails.length - 1];
+      let hit = false;
+      for (const O of mine) {
+        for (let i = T.start; i < T.end && !hit; i += 2) for (let j = O.start; j < O.end; j += 2)
+          if ((xs[i] - xs[j]) ** 2 + (zs[i] - zs[j]) ** 2 < clear * clear) { hit = true; break; }
+        if (hit) break;
+      }
+      if (hit) {   // overlaps another ramp: leave it out
+        for (const arr of [xs, zs, ys, lx, lz, cam, hw, tid]) arr.length = T.start;
+        trails.pop();
+      } else mine.push(T);
+    }
+  });
+  // spatial index of segments
+  const gc = 100, gn = Math.ceil(2 * mapS / gc), grid = new Array(gn * gn);
+  const reachI = cfg.roadHalf + ROAD_BANK + 5;
+  for (let i = 0; i < xs.length - 1; i++) {
+    if (tid[i] !== tid[i + 1]) continue;
+    const i0 = Math.max(0, Math.floor((Math.min(xs[i], xs[i + 1]) - reachI + mapS) / gc));
+    const i1 = Math.min(gn - 1, Math.floor((Math.max(xs[i], xs[i + 1]) + reachI + mapS) / gc));
+    const j0 = Math.max(0, Math.floor((Math.min(zs[i], zs[i + 1]) - reachI + mapS) / gc));
+    const j1 = Math.min(gn - 1, Math.floor((Math.max(zs[i], zs[i + 1]) + reachI + mapS) / gc));
+    for (let j = j0; j <= j1; j++) for (let k = i0; k <= i1; k++) (grid[j * gn + k] || (grid[j * gn + k] = [])).push(i);
+  }
+  ROAD = { xs, zs, ys, lx, lz, cam, hw, tid, trails, n: xs.length, gc, gn, grid };
+  // make sure every dead end really is one: if a crux didn't come out steep
+  // enough, wash out the middle of that ramp
+  for (const T of trails) {
+    if (!T.kind || T.kind === "end") continue;
+    let m = 0;
+    for (let i = T.start; i < T.end; i++) m = Math.max(m, steepAt(xs[i], zs[i]));
+    if (m >= LIMIT + 3) continue;
+    const a = T.start + Math.floor((T.end - T.start) * 0.3), c = T.start + Math.floor((T.end - T.start) * 0.85);
+    for (let i = a; i <= c; i++) hw[i] = lerp(cfg.roadHalf, -ROAD_BANK, smooth(Math.min(i - a, c - i) / 5));
+    T.kind = "pinch";
+  }
+}
+// The trail that most claims this spot: distance, segment, how much it's on
+// the trail (w), and sideways offset (+ toward the drop-off)
+const _rq = { d: 0, i: 0, t: 0, o: 0, w: 0, hw: 0 };
+function roadQuery(x, z) {
+  if (!ROAD) return null;
+  const { xs, zs, hw, gc, gn, grid } = ROAD;
+  const ci = Math.floor((x + mapS) / gc), cj = Math.floor((z + mapS) / gc);
+  if (ci < 0 || cj < 0 || ci >= gn || cj >= gn) return null;
+  const list = grid[cj * gn + ci];
+  if (!list) return null;
+  let bw = -1, bd = 1e18, bi = -1, bt = 0, bh = 0;
+  for (let k = 0; k < list.length; k++) {
+    const i = list[k], ax = xs[i], az = zs[i], vx = xs[i + 1] - ax, vz = zs[i + 1] - az;
+    const L2 = vx * vx + vz * vz, len = Math.sqrt(L2);
+    const tr = ((x - ax) * vx + (z - az) * vz) / L2, t = clamp(tr, 0, 1);
+    const px = ax + vx * t - x, pz = az + vz * t - z, d2 = px * px + pz * pz;
+    const h = lerp(hw[i], hw[i + 1], t);
+    // sideways distance sets the banks; past the segment's ends it fades out quickly,
+    // so ramps end (or wash out) where they look like they do
+    const over = tr < 0 ? -tr * len : tr > 1 ? (tr - 1) * len : 0;
+    const dl = Math.abs((x - ax) * vz - (z - az) * vx) / len;
+    const w = (1 - smooth((dl - h) / ROAD_BANK)) * (1 - smooth(over / 24));
+    if (w > bw + 1e-6 || (w > bw - 1e-6 && d2 < bd)) { bw = w; bd = d2; bi = i; bt = t; bh = h; }
+  }
+  const i = bi, t = bt;
+  const px = lerp(xs[i], xs[i + 1], t), pz = lerp(zs[i], zs[i + 1], t);
+  _rq.d = Math.sqrt(bd); _rq.i = i; _rq.t = t; _rq.w = bw; _rq.hw = bh;
+  _rq.o = (x - px) * lerp(ROAD.lx[i], ROAD.lx[i + 1], t) + (z - pz) * lerp(ROAD.lz[i], ROAD.lz[i + 1], t);
+  return _rq;
+}
+function roadWeight(q) { return q ? q.w : 0; }
+function hS(x, z) {
+  const h = hNatural(x, z);
+  const q = roadQuery(x, z), w = roadWeight(q);
+  if (w <= 0) return h;
+  const { ys, cam } = ROAD, i = q.i, t = q.t;
+  const y = lerp(ys[i], ys[i + 1], t) - lerp(cam[i], cam[i + 1], t) * q.o;
+  return lerp(h, y, w);
+}
+
+// The faceted mesh is the ground: physics reads heights straight off its triangles.
+let MG = null;
+function buildMeshGrid() {
+  const N = Math.min(420, Math.ceil(2 * mapS / FACET));
+  const cell = 2 * mapS / N;
+  const n = (N + 1) * (N + 1);
+  const xs = new Float32Array(n), ys = new Float32Array(n), zs = new Float32Array(n);
+  for (let j = 0; j <= N; j++) for (let i = 0; i <= N; i++) {
+    const edge = i === 0 || j === 0 || i === N || j === N;
+    const x = -mapS + i * cell + (edge ? 0 : (hash2(i, j) - 0.5) * cell * 0.55);
+    const z = -mapS + j * cell + (edge ? 0 : (hash2(j + 7, i + 3) - 0.5) * cell * 0.55);
+    const r = Math.hypot(x, z);
+    const jit = r < TOP ? 0.15 : 1 - 0.95 * roadWeight(roadQuery(x, z));   // keep the top and the trail fairly smooth
+    const v = j * (N + 1) + i;
+    xs[v] = x; zs[v] = z; ys[v] = hS(x, z) + (hash2(i * 3.1, j * 1.7) - 0.5) * 10 * jit;
+  }
+  MG = { N, cell, xs, ys, zs };
+}
+function triAt(a, b, c, x, z) {
+  const { xs, ys, zs } = MG;
+  const x1 = xs[a], z1 = zs[a], x2 = xs[b], z2 = zs[b], x3 = xs[c], z3 = zs[c];
+  const det = (z2 - z3) * (x1 - x3) + (x3 - x2) * (z1 - z3);
+  if (Math.abs(det) < 1e-9) return null;
+  const l1 = ((z2 - z3) * (x - x3) + (x3 - x2) * (z - z3)) / det;
+  const l2 = ((z3 - z1) * (x - x3) + (x1 - x3) * (z - z3)) / det;
+  const l3 = 1 - l1 - l2;
+  if (l1 < -1e-6 || l2 < -1e-6 || l3 < -1e-6) return null;
+  return l1 * ys[a] + l2 * ys[b] + l3 * ys[c];
+}
+const NI = [0, -1, 1, 0, 0, -1, 1, -1, 1], NJ = [0, 0, 0, -1, 1, -1, -1, 1, 1];
+function hM(x, z) {
+  if (!MG) return hS(x, z);
+  const { N, cell } = MG;
+  const i0 = Math.floor((x + mapS) / cell), j0 = Math.floor((z + mapS) / cell);
+  for (let k = 0; k < 9; k++) {
+    const i = i0 + NI[k], j = j0 + NJ[k];
+    if (i < 0 || j < 0 || i >= N || j >= N) continue;
+    const a = j * (N + 1) + i, b = a + 1, d = a + N + 1, e = d + 1;
+    let y;
+    if ((i + j) % 2) { y = triAt(a, d, b, x, z); if (y === null) y = triAt(b, d, e, x, z); }
+    else { y = triAt(a, d, e, x, z); if (y === null) y = triAt(a, e, b, x, z); }
+    if (y !== null) return y;
+  }
+  return hS(x, z);
+}
+// Surface gradient of the facets, averaged over the boulder's footprint
+const FOOT = 25;
+function meshGrad(x, z, e = FOOT) {
+  return { x: (hM(x + e, z) - hM(x - e, z)) / (2 * e), z: (hM(x, z + e) - hM(x, z - e)) / (2 * e) };
+}
+// Slope of the ground the facets are cut from, averaged over the boulder's footprint
+function surfGrad(x, z, e = FOOT) {
+  return { x: (hS(x + e, z) - hS(x - e, z)) / (2 * e), z: (hS(x, z + e) - hS(x, z - e)) / (2 * e) };
+}
+// Gameplay slope: scaled back to the intended push difficulty
+function grad(x, z) {
+  const g = surfGrad(x, z);
+  return { x: g.x / VERT, z: g.z / VERT };
+}
+// Steepness of the ground in degrees, as it looks on screen
+function steepAt(x, z) {
+  const g = surfGrad(x, z);
+  return Math.atan(Math.hypot(g.x, g.z)) * DEG;
+}
+const uOf = uAt;   // progress up the mountain
+
+// ---------------------------------------------------------------------------
+// Game state
+// ---------------------------------------------------------------------------
+const keys = {};
+let state = "title";   // title | play | paused | crushed | won
+let level = 1, cfg = levelCfg(1);
+let P, B, stats, shake = 0, flash = 0, tint = true, death = null;
+let bestLevel = store.get("sisyphus.best", 1);
+
+function startLevel(n) {
+  level = n; cfg = levelCfg(n);
+  buildMountain(cfg);
+  buildTrails(mulberry(cfg.seed + 3));
+  buildMeshGrid();
+  // start at the foot of the mountain, facing the peak
+  const thS = mulberry(cfg.seed + 7)() * Math.PI * 2;
+  const [bx, bz] = posAt(thS, 30), [px, pz] = posAt(thS, -45);
+  let dx = bx - px, dz = bz - pz;
+  const dl = Math.hypot(dx, dz) || 1; dx /= dl; dz /= dl;
+  B = { x: bx, z: bz, vx: 0, vz: 0, teeterT: -1, loose: false, q: new THREE.Quaternion() };
+  P = { x: px, z: pz, jy: 0, vy: 0,
+        duckT: 0, duckCD: 0, impactT: -1, under: false, contact: false, pushing: false,
+        moving: 0, phase: 0, crushed: false, yaw: Math.atan2(dx, dz), heading: Math.atan2(dx, dz), fx: dx, fz: dz };
+  death = null; clearGore();
+  stats = { t: 0, slips: 0 };
+  shake = 0; flash = 0;
+  state = "play";
+  camInit = false;
+  buildWorld();
+}
+
+function bCenter() {
+  const g = meshGrad(B.x, B.z);
+  return { x: B.x, z: B.z, y: hM(B.x, B.z) + R * Math.sqrt(1 + g.x * g.x + g.z * g.z) };
+}
+
+function slip() {
+  if (B.teeterT >= 0 || B.loose) return;
+  B.teeterT = 0.3 + Math.random() * 0.35;   // it hangs for an unpredictable moment, then rolls back
+  B.vx = B.vz = 0;
+  stats.slips++;
+  sfx.creak();
+}
+function crush() {
+  state = "crushed"; P.crushed = true; flash = 1; shake = 22;
+  sfx.crush();
+  startDeath();
+}
+function tryDuck() {
+  if (state !== "play" || P.duckCD > 0 || P.jy > 0.5) return;
+  P.duckT = DUCK_TIME; P.duckCD = DUCK_COOLDOWN;
+  sfx.duck();
+}
+function tryJump() {
+  if (state !== "play" || P.jy > 0.5 || P.duckT > 0) return;
+  P.vy = JUMP_V; P.jy = 0.6;
+  sfx.jump();
+}
+
+// Distance from the boulder's center to the player's body (a vertical capsule)
+function bodyDistance(bc) {
+  const feet = hM(P.x, P.z) + P.jy;
+  const top = feet + PH;
+  const cy = clamp(bc.y, feet + PW, top - PW);
+  const dx = P.x - bc.x, dz = P.z - bc.z, dy = bc.y - cy;
+  return { d: Math.sqrt(dx * dx + dz * dz + dy * dy), dx, dy, dz };
+}
+
+function clampToMap(o, m) {
+  const r = Math.sqrt(o.x * o.x + o.z * o.z), lim = mapS - m;
+  if (r > lim) { o.x *= lim / r; o.z *= lim / r; return true; }
+  return false;
+}
+
+// ---------------------------------------------------------------------------
+// Update
+// ---------------------------------------------------------------------------
+function update(dt) {
+  if (state !== "play") return;
+  stats.t += dt;
+
+  const kW = keys.KeyW || keys.ArrowUp, kS = keys.KeyS || keys.ArrowDown;
+  const kA = keys.KeyA, kD = keys.KeyD;
+  const turnIn = (keys.KeyE || keys.ArrowRight ? 1 : 0) - (keys.KeyQ || keys.ArrowLeft ? 1 : 0);
+
+  P.duckT = Math.max(0, P.duckT - dt);
+  P.duckCD = Math.max(0, P.duckCD - dt);
+  const ducking = P.duckT > 0;
+
+  // Jumping
+  if (P.jy > 0 || P.vy > 0) {
+    P.vy -= JUMP_G * dt;
+    P.jy += P.vy * dt;
+    if (P.jy <= 0) { P.jy = 0; P.vy = 0; }
+  }
+  const airborne = P.jy > 0.5;
+
+  // Control frame: forward points from the player toward the peak
+  const pr = Math.hypot(P.x, P.z);
+  // Q / E turn you; everything else is relative to the way you face
+  P.heading -= turnIn * TURN * dt;   // E = clockwise seen from above
+  P.fx = Math.sin(P.heading); P.fz = Math.cos(P.heading);
+  const fx = P.fx, fz = P.fz, rx = -fz, rz = fx;        // right = forward × up
+  const fwdIn = (kW ? 1 : 0) - (kS ? 1 : 0), latIn = (kD ? 1 : 0) - (kA ? 1 : 0);
+  let ix = fx * fwdIn + rx * latIn, iz = fz * fwdIn + rz * latIn;
+  const il = Math.hypot(ix, iz);
+  if (il > 0) { ix /= il; iz /= il; }
+
+  // Relationship to the boulder
+  let bc = bCenter();
+  let dx = B.x - P.x, dz = B.z - P.z;
+  const dist = Math.hypot(dx, dz) || 1;
+  dx /= dist; dz /= dist;                                // direction player -> boulder
+  const g = grad(B.x, B.z), gl = Math.hypot(g.x, g.z);
+  const downX = gl > 1e-4 ? -g.x / gl : 0, downZ = gl > 1e-4 ? -g.z / gl : 0;
+  const steep = steepAt(B.x, B.z) > LIMIT;
+  // A boulder that has slipped rolls free until it reaches ground gentle enough to stop it
+  if (B.loose) { B.looseT -= dt; if (B.looseT <= 0 && !steep) B.loose = false; }
+  const touching = dist <= R + PW + 2;
+  const canAct = !ducking && !airborne && B.teeterT < 0 && !B.loose;
+  // The boulder can only be held if it would roll straight into you
+  const rollsIntoMe = gl < 0.03 || (downX * -dx + downZ * -dz) > 0.6;
+  const pushing = canAct && touching && il > 0 && (ix * dx + iz * dz) > 0.3;
+  const holding = canAct && touching && il === 0 && rollsIntoMe;
+  P.contact = (pushing || holding) && !steep;
+  P.pushing = pushing && !steep;
+  P.moving = 0;
+  if ((pushing || holding) && steep) slip();
+
+  if (P.contact) {
+    if (pushing) {
+      // you swing around behind the boulder so it goes the way you're pressing
+      const turn = Math.atan2(dx * iz - dz * ix, dx * ix + dz * iz);
+      const a = clamp(turn, -STEER * dt, STEER * dt);
+      if (a) {
+        const c = Math.cos(a), sn = Math.sin(a);
+        const nx = dx * c - dz * sn, nz = dx * sn + dz * c;
+        dx = nx; dz = nz;
+      }
+      const along = g.x * dx + g.z * dz;                  // uphill slope in the push direction
+      const speed = PUSH_SPEED / (1 + 1.5 * Math.max(0, along));
+      // cross-slope gravity drags the boulder sideways while you push
+      const px = g.x - dx * along, pz = g.z - dz * along;
+      B.vx = dx * speed - px * SIDE_DRIFT;
+      B.vz = dz * speed - pz * SIDE_DRIFT;
+      P.phase += speed * dt * 0.09;
+      if (Math.random() < dt * 6) dust(P.x, P.z, 1);
+    } else {
+      B.vx = B.vz = 0;
+    }
+    B.x += B.vx * dt; B.z += B.vz * dt;
+    clampToMap(B, R);
+    P.x = B.x - dx * (R + PW); P.z = B.z - dz * (R + PW);
+    P.yaw = Math.atan2(dx, dz);
+    // pushed onto ground that's too steep: it gets away from you
+    if (steepAt(B.x, B.z) > LIMIT) slip();
+  } else {
+    // The boulder is unsupported
+    if (B.teeterT >= 0) {
+      B.vx = B.vz = 0;
+      B.teeterT -= dt;
+      if (B.teeterT < 0) {
+        B.vx = downX * 80; B.vz = downZ * 80; B.loose = true; B.looseT = 0.7;
+        sfx.lurch(); shake = 5; dust(B.x, B.z, 10);
+      }
+    } else {
+      const k = 1 / Math.sqrt(1 + gl * gl);
+      B.vx += -g.x * G * k * dt; B.vz += -g.z * G * k * dt;
+      let sp = Math.hypot(B.vx, B.vz);
+      if (sp > 0) {
+        const ns = clamp(sp - ROLL_FRICTION * dt, 0, cfg.maxRoll);
+        B.vx *= ns / sp; B.vz *= ns / sp; sp = ns;
+      }
+      B.x += B.vx * dt; B.z += B.vz * dt;
+      if (clampToMap(B, R)) { B.vx = B.vz = 0; }
+      if (sp > 40 && Math.random() < dt * 20) dust(B.x, B.z, 1);
+    }
+
+    // The player walks
+    let sp = 0;
+    if (il > 0) {
+      const gp = grad(P.x, P.z);
+      const up = Math.max(0, gp.x * ix + gp.z * iz);
+      sp = (fwdIn > 0 ? WALK_FWD : fwdIn < 0 ? WALK_BACK : STRAFE) / (1 + 0.8 * up);
+      if (ducking) sp *= 0.3;
+      P.x += ix * sp * dt; P.z += iz * sp * dt;
+      clampToMap(P, PW);
+      P.yaw = P.heading;            // always face forward: A / D sidestep, S backs up
+    }
+    P.moving = sp;
+    P.phase += sp * dt * 0.09;
+
+    // Collision between player and boulder
+    bc = bCenter();
+    const c = bodyDistance(bc);
+    const bspeed = Math.hypot(B.vx, B.vz);
+    if (c.d < R + PW - 1) {
+      const hd = Math.hypot(c.dx, c.dz) || 1;
+      const sx = c.dx / hd, sz = c.dz / hd;                // boulder -> player
+      const sep = Math.sqrt(Math.max(0, (R + PW) * (R + PW) - c.dy * c.dy));
+      const approaching = bspeed > 10 && (B.vx * sx + B.vz * sz) > 0;
+      if (P.under) {
+        // passing beneath it
+      } else if (approaching && ducking) {
+        P.under = true; P.impactT = -1;
+      } else if (approaching && (B.loose || steepAt(B.x, B.z) > LIMIT || P.impactT >= 0)) {
+        // a slipping boulder can't be stopped: duck now or be crushed
+        if (P.impactT < 0) { P.impactT = 0; shake = Math.max(shake, 6); }
+        P.x = bc.x + sx * sep; P.z = bc.z + sz * sep;
+      } else if (approaching) {
+        // on manageable ground you stop it in its tracks
+        B.vx = B.vz = 0;
+        sfx.catch(); shake = Math.max(shake, 4);
+        P.x = bc.x + sx * sep; P.z = bc.z + sz * sep;
+      } else {
+        P.x = bc.x + sx * sep; P.z = bc.z + sz * sep;   // blocked
+      }
+    } else {
+      // Stay "under" until the boulder has actually rolled past
+      if (P.under) {
+        const hx = P.x - bc.x, hz = P.z - bc.z;
+        if (Math.hypot(hx, hz) > R + PW + 4 && (bspeed < 10 || B.vx * hx + B.vz * hz < 0)) P.under = false;
+      }
+      if (bspeed < 10) P.impactT = -1;
+    }
+
+    // Once a slipping boulder has hit you, you have a split second to duck
+    if (P.impactT >= 0) {
+      if (ducking) { P.under = true; P.impactT = -1; }
+      else {
+        P.impactT += dt;
+        if (P.impactT > IMPACT_WINDOW) { crush(); return; }
+      }
+    }
+  }
+
+  // Roll the boulder's mesh
+  const bsp = Math.hypot(B.vx, B.vz);
+  if (bsp > 0.01) {
+    _axis.set(B.vz / bsp, 0, -B.vx / bsp);
+    _q.setFromAxisAngle(_axis, bsp * dt / R);
+    B.q.premultiply(_q);
+  }
+
+  if (uOf(B.x, B.z) >= cfg.length - 15) {
+    state = "won"; sfx.win();
+    if (level + 1 > bestLevel) { bestLevel = level + 1; store.set("sisyphus.best", bestLevel); }
+    showOverlay();
+  }
+}
+const _axis = new THREE.Vector3(), _q = new THREE.Quaternion();
+
+// ---------------------------------------------------------------------------
+// 3D world
+// ---------------------------------------------------------------------------
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(2, window.devicePixelRatio || 1));
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+document.body.insertBefore(renderer.domElement, document.body.firstChild);
+
+const scene = new THREE.Scene();
+scene.fog = new THREE.Fog(new THREE.Color(0xe0a27a), 60, 520);
+const camera = new THREE.PerspectiveCamera(58, 1, 0.1, 8000);
+
+function resize() {
+  renderer.setSize(window.innerWidth, window.innerHeight);
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+}
+window.addEventListener("resize", resize);
+resize();
+
+// Sky dome
+const sky = (() => {
+  const geo = new THREE.SphereGeometry(5000, 32, 16);
+  const cols = [], pos = geo.attributes.position;
+  const top = new THREE.Color(0x2a1a44), mid = new THREE.Color(0xc8664c), low = new THREE.Color(0xf4c08a);
+  for (let i = 0; i < pos.count; i++) {
+    const t = pos.getY(i) / 5000;
+    const c = t > 0.12 ? mid.clone().lerp(top, Math.min(1, (t - 0.12) / 0.6)) : low.clone().lerp(mid, Math.max(0, (t + 0.05) / 0.17));
+    cols.push(c.r, c.g, c.b);
+  }
+  geo.setAttribute("color", new THREE.Float32BufferAttribute(cols, 3));
+  const m = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({ vertexColors: true, side: THREE.BackSide, fog: false }));
+  scene.add(m);
+  const sun = new THREE.Mesh(new THREE.SphereGeometry(140, 16, 8), new THREE.MeshBasicMaterial({ color: 0xfff0c8, fog: false }));
+  sun.position.set(-2600, 1300, 3600);
+  m.add(sun);
+  return m;
+})();
+
+scene.add(new THREE.HemisphereLight(0xffd8b0, 0x3a2830, 0.7));
+const sunLight = new THREE.DirectionalLight(0xffd9a0, 1.15);
+sunLight.castShadow = true;
+sunLight.shadow.mapSize.set(2048, 2048);
+Object.assign(sunLight.shadow.camera, { left: -14, right: 14, top: 14, bottom: -14, near: 1, far: 120 });
+sunLight.shadow.bias = -0.0008;
+scene.add(sunLight, sunLight.target);
+
+const mat = c => new THREE.MeshStandardMaterial({ color: c, roughness: 0.95, flatShading: true });
+
+let worldGroup = null;
+
+// Too-steep ground is tinted red, but only near the boulder: from a distance
+// you have to judge the routes by eye.
+const TINT_R = 280;
+const tintU = { uB: { value: new THREE.Vector2() }, uR: { value: TINT_R * K }, uTint: { value: 1 } };
+function tintedMaterial() {
+  const m = new THREE.MeshStandardMaterial({ vertexColors: true, flatShading: true, roughness: 1 });
+  m.onBeforeCompile = sh => {
+    Object.assign(sh.uniforms, tintU);
+    sh.vertexShader = "attribute float danger;\nvarying float vDanger;\nvarying vec3 vWP;\n" +
+      sh.vertexShader.replace("#include <begin_vertex>",
+        "#include <begin_vertex>\n  vDanger = danger;\n  vWP = (modelMatrix * vec4(transformed, 1.0)).xyz;");
+    sh.fragmentShader = "uniform vec2 uB;\nuniform float uR;\nuniform float uTint;\nvarying float vDanger;\nvarying vec3 vWP;\n" +
+      sh.fragmentShader.replace("#include <color_fragment>",
+        "#include <color_fragment>\n  float tf = uTint * vDanger * (1.0 - smoothstep(uR * 0.55, uR, distance(vWP.xz, uB)));\n" +
+        "  diffuseColor.rgb = mix(diffuseColor.rgb, vec3(0.72, 0.2, 0.16), tf);");
+  };
+  return m;
+}
+
+// Facet colors: grassy foothills, rock, then snow toward the peak
+const C_GRASS = new THREE.Color(0x7d8a4a), C_GRASS2 = new THREE.Color(0x5f6e3c);
+const C_ROCK = new THREE.Color(0x8a6e5c), C_ROCK2 = new THREE.Color(0x6a5650);
+const C_SNOW = new THREE.Color(0xf2ece4), C_DANGER = new THREE.Color(0xb8322a), C_PATH = new THREE.Color(0xb89a6c);
+function facetColor(y, ny, n) {
+  const top = profileAt(cfg.length) * VERT;
+  const hf = clamp(y / top, -0.2, 1.1);
+  const steep = 1 - ny;                                // 0 = flat facet
+  let c;
+  if (hf < 0.1) c = C_GRASS.clone().lerp(C_GRASS2, n);
+  else if (hf < 0.18) c = C_GRASS.clone().lerp(C_ROCK, (hf - 0.1) / 0.08);
+  else c = C_ROCK.clone().lerp(C_ROCK2, n * 0.8);
+  if (hf > 0.75 && steep < 0.25 + n * 0.08) c.lerp(C_SNOW, smooth((hf - 0.75) / 0.12));
+  c.multiplyScalar(1 - steep * 0.7 + n * 0.08);
+  return c;
+}
+
+function applyTint() { tintU.uTint.value = tint ? 1 : 0; }
+
+function buildWorld() {
+  if (worldGroup) {
+    scene.remove(worldGroup);
+    worldGroup.traverse(o => { if (o.geometry) o.geometry.dispose(); });
+  }
+  worldGroup = new THREE.Group();
+  scene.add(worldGroup);
+  const rnd = mulberry(cfg.seed + 5);
+
+  // Faceted mountain mesh
+  const N = MG.N;
+  const verts = new Float32Array((N + 1) * (N + 1) * 3);
+  for (let v = 0; v < (N + 1) * (N + 1); v++) {
+    verts[v * 3] = MG.xs[v] * K; verts[v * 3 + 1] = MG.ys[v] * K; verts[v * 3 + 2] = MG.zs[v] * K;
+  }
+  const idx = [];
+  for (let j = 0; j < N; j++) for (let i = 0; i < N; i++) {
+    const a = j * (N + 1) + i, b = a + 1, d = a + N + 1, e = d + 1;
+    if ((i + j) % 2) idx.push(a, d, b, b, d, e); else idx.push(a, d, e, a, e, b);
+  }
+  let geo = new THREE.BufferGeometry();
+  geo.setAttribute("position", new THREE.BufferAttribute(verts, 3));
+  geo.setIndex(idx);
+  geo = geo.toNonIndexed();
+  geo.computeVertexNormals();
+  const pos = geo.attributes.position, nor = geo.attributes.normal;
+  const nat = new Float32Array(pos.count * 3), dng = new Float32Array(pos.count);
+  for (let f = 0; f < pos.count; f += 3) {
+    const y = (pos.getY(f) + pos.getY(f + 1) + pos.getY(f + 2)) / 3 / K;
+    const ny = Math.abs(nor.getY(f));
+    const c = facetColor(y, ny, hash2(f, 0.5));
+    // Ground the boulder would slip on gets a red tint (toggle with T)
+    const fcx = (pos.getX(f) + pos.getX(f + 1) + pos.getX(f + 2)) / 3 / K;
+    const fcz = (pos.getZ(f) + pos.getZ(f + 1) + pos.getZ(f + 2)) / 3 / K;
+    // the trail is worn bare
+    const rq = roadQuery(fcx, fcz);
+    const rw = rq ? smooth((Math.max(rq.hw, cfg.roadHalf * 0.5) + 6 - rq.d) / 14) : 0;
+    if (rw > 0) c.lerp(C_PATH.clone().multiplyScalar(0.9 + hash2(f, 1.5) * 0.15), rw * 0.8);
+    const deg = steepAt(fcx, fcz);
+    const dv = deg > LIMIT ? 0.6 : deg > LIMIT - 3 ? 0.2 : 0;
+    for (let k = 0; k < 3; k++) {
+      const o = (f + k) * 3;
+      nat[o] = c.r; nat[o + 1] = c.g; nat[o + 2] = c.b;
+      dng[f + k] = dv;
+    }
+  }
+  geo.setAttribute("color", new THREE.BufferAttribute(nat, 3));
+  geo.setAttribute("danger", new THREE.BufferAttribute(dng, 1));
+  applyTint();
+  const mountain = new THREE.Mesh(geo, tintedMaterial());
+  mountain.receiveShadow = true;
+  worldGroup.add(mountain);
+
+  // Plain beyond the mountain
+  const plain = new THREE.Mesh(new THREE.CircleGeometry(4000, 48), mat(0x5f6a3a));
+  plain.rotation.x = -Math.PI / 2; plain.position.y = -30 * K;
+  worldGroup.add(plain);
+
+  // Distant mountains on the horizon
+  const mm = mat(0x7a5262);
+  for (let i = 0; i < 26; i++) {
+    const a = rnd() * Math.PI * 2, d = mapS * K + 320 + rnd() * 700;
+    const h = 80 + rnd() * 240, rad = 70 + rnd() * 120;
+    const m = new THREE.Mesh(new THREE.ConeGeometry(rad, h, 5 + Math.floor(rnd() * 3)), mm);
+    m.position.set(Math.cos(a) * d, -2 + h / 2, Math.sin(a) * d);
+    m.rotation.y = rnd() * 6;
+    worldGroup.add(m);
+  }
+
+  // Scattered rocks across the mountainside (instanced)
+  const rockCount = Math.round(rFoot * rFoot / 9000);
+  const rocks = new THREE.InstancedMesh(new THREE.DodecahedronGeometry(1, 0), mat(0x7a6a62), rockCount);
+  const m4 = new THREE.Matrix4(), q = new THREE.Quaternion(), e3 = new THREE.Euler(), s3 = new THREE.Vector3(), p3 = new THREE.Vector3();
+  for (let i = 0; i < rockCount; i++) {
+    const a = rnd() * Math.PI * 2, r = TOP + 60 + Math.sqrt(rnd()) * (rFoot + 500);
+    const x = Math.cos(a) * r, z = Math.sin(a) * r;
+    const s = (3 + rnd() * 9) * K;
+    const rq = roadQuery(x, z);
+    if (rq && (rq.w > 0 || rq.d < rq.hw + 10)) { m4.makeScale(0, 0, 0); rocks.setMatrixAt(i, m4); continue; }
+    q.setFromEuler(e3.set(rnd() * 3, rnd() * 3, 0));
+    m4.compose(p3.set(x * K, hM(x, z) * K + s * 0.3, z * K), q, s3.set(s, s * (0.6 + rnd() * 0.5), s));
+    rocks.setMatrixAt(i, m4);
+  }
+  rocks.castShadow = true; rocks.receiveShadow = true;
+  worldGroup.add(rocks);
+}
+
+// Boulder
+const boulder = (() => {
+  const geo = new THREE.IcosahedronGeometry(R * K, 2);
+  const p = geo.attributes.position, v = new THREE.Vector3();
+  const r = mulberry(7);
+  const seen = new Map();
+  for (let i = 0; i < p.count; i++) {
+    v.fromBufferAttribute(p, i);
+    const key = `${v.x.toFixed(3)},${v.y.toFixed(3)},${v.z.toFixed(3)}`;
+    if (!seen.has(key)) seen.set(key, 0.93 + r() * 0.1);
+    v.multiplyScalar(seen.get(key));
+    p.setXYZ(i, v.x, v.y, v.z);
+  }
+  geo.computeVertexNormals();
+  const m = new THREE.Mesh(geo, new THREE.MeshStandardMaterial({ color: 0x8a837a, roughness: 1, flatShading: true }));
+  m.castShadow = true;
+  scene.add(m);
+  return m;
+})();
+
+// Player figure, built in sim units then scaled by K
+const hero = (() => {
+  const skin = mat(0xd9a27a), tunic = mat(0xe8e2d0), hair = mat(0x3a2a24), belt = mat(0x8a5a3a);
+  const root = new THREE.Group(), body = new THREE.Group();
+  root.add(body);
+  const mk = (geo, m, parent, x, y, z) => { const o = new THREE.Mesh(geo, m); o.position.set(x, y, z); o.castShadow = true; parent.add(o); return o; };
+  const limb = (parent, x, y, len, r, m) => {
+    const piv = new THREE.Group(); piv.position.set(x, y, 0); parent.add(piv);
+    mk(new THREE.CylinderGeometry(r, r * 0.85, len, 7), m, piv, 0, -len / 2, 0);
+    return piv;
+  };
+  const legL = limb(body, 5, 24, 24, 3.2, skin), legR = limb(body, -5, 24, 24, 3.2, skin);
+  const torso = new THREE.Group(); torso.position.y = 24; body.add(torso);
+  mk(new THREE.BoxGeometry(16, 24, 10), tunic, torso, 0, 12, 0);
+  mk(new THREE.CylinderGeometry(9, 12, 12, 8), tunic, torso, 0, 1, 0);
+  mk(new THREE.BoxGeometry(17, 3, 11), belt, torso, 0, 8, 0);
+  const head = mk(new THREE.SphereGeometry(7, 10, 8), skin, torso, 0, 32, 1);
+  const hr = mk(new THREE.SphereGeometry(7.4, 10, 8, 0, Math.PI * 2, 0, Math.PI * 0.55), hair, torso, 0, 33, -0.5);
+  hr.rotation.x = -0.3;
+  const armL = limb(torso, 10.5, 22, 22, 2.6, skin), armR = limb(torso, -10.5, 22, 22, 2.6, skin);
+  const handL = new THREE.Object3D(), handR = new THREE.Object3D();
+  handL.position.y = handR.position.y = -23; armL.add(handL); armR.add(handR);
+  root.scale.setScalar(K);
+  scene.add(root);
+  return { root, body, torso, head, legL, legR, armL, armR, handL, handR };
+})();
+
+// Dust particles
+const dustPool = [];
+{
+  const g = new THREE.TetrahedronGeometry(0.07);
+  const m = new THREE.MeshBasicMaterial({ color: 0xcaa883, transparent: true, opacity: 0.7 });
+  for (let i = 0; i < 90; i++) { const o = new THREE.Mesh(g, m); o.visible = false; scene.add(o); dustPool.push({ o, t: 0, life: 0, v: new THREE.Vector3() }); }
+}
+let dustIdx = 0;
+function dust(x, z, n) {
+  const y = hM(x, z);
+  for (let i = 0; i < n; i++) {
+    const d = dustPool[dustIdx++ % dustPool.length];
+    d.o.visible = true; d.t = 0; d.life = 0.6 + Math.random() * 0.5;
+    d.o.position.set(x * K + (Math.random() - 0.5) * 0.6, y * K + 0.1, z * K + (Math.random() - 0.5) * 0.6);
+    d.v.set((Math.random() - 0.5) * 1.5, Math.random() * 1.5 + 0.3, (Math.random() - 0.5) * 1.5);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Death: the boulder rolls onto Sisyphus and flattens him
+// ---------------------------------------------------------------------------
+const BLOOD = 0x7c0a0a;
+const bloodMat = new THREE.MeshStandardMaterial({ color: 0x6a0707, roughness: 0.18, metalness: 0.15 });
+const poolMat = new THREE.MeshStandardMaterial({ color: 0x560505, roughness: 0.12, metalness: 0.2,
+  polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2 });
+function blobGeo(seed, n = 22) {
+  // an irregular splash shape lying flat (radius ~1)
+  const r = mulberry(seed), pts = [];
+  for (let i = 0; i < n; i++) {
+    const a = i / n * Math.PI * 2, k = 0.7 + r() * 0.45 + (r() < 0.25 ? r() * 0.5 : 0);
+    pts.push(new THREE.Vector2(Math.cos(a) * k, Math.sin(a) * k));
+  }
+  const g = new THREE.ShapeGeometry(new THREE.Shape(pts));
+  g.rotateX(-Math.PI / 2);
+  return g;
+}
+const corpse = (() => {
+  const skin = mat(0xc98d6a), tunic = mat(0xd6cdb8), hair = mat(0x3a2a24), belt = mat(0x8a5a3a);
+  const flesh = new THREE.MeshStandardMaterial({ color: 0x8c1414, roughness: 0.3, flatShading: true });
+  const root = new THREE.Group();   // local: y = ground normal, +z = toward where the boulder came from
+  const add = (geo, m, x, y, z, ry = 0, sx = 1, sy = 1, sz = 1) => {
+    const o = new THREE.Mesh(geo, m); o.position.set(x, y, z); o.rotation.y = ry; o.scale.set(sx, sy, sz);
+    o.castShadow = true; o.receiveShadow = true; root.add(o); return o;
+  };
+  // flattened torso, spread wide under the boulder
+  add(new THREE.BoxGeometry(26, 2.2, 30), tunic, 0, 1.1, -10);
+  add(new THREE.BoxGeometry(27, 2.4, 3.5), belt, 0, 1.3, 3);
+  add(new THREE.IcosahedronGeometry(11, 1), flesh, 1, 1.2, -5, 0.4, 1.25, 0.16, 1.05);   // burst open
+  // squashed head, face up, burst open
+  add(new THREE.SphereGeometry(7, 12, 8), hair, 0.8, 0.8, -42, 0.3, 2.0, 0.2, 1.4);
+  add(new THREE.SphereGeometry(7, 12, 8), skin, 0, 1.4, -36, 0, 1.8, 0.24, 1.45);
+  const dark = mat(0x1a0c0c);
+  add(new THREE.BoxGeometry(4.5, 1, 1.2), dark, -4, 3, -37, 0.785); add(new THREE.BoxGeometry(4.5, 1, 1.2), dark, -4, 3, -37, -0.785);   // X eyes
+  add(new THREE.BoxGeometry(4.5, 1, 1.2), dark, 4, 3, -37, 0.785); add(new THREE.BoxGeometry(4.5, 1, 1.2), dark, 4, 3, -37, -0.785);
+  add(new THREE.SphereGeometry(3, 8, 6), flesh, 5, 2.2, -32, 0, 1.6, 0.3, 1.2);
+  add(new THREE.SphereGeometry(2.2, 8, 6), flesh, -6, 2.1, -40, 0, 1.4, 0.3, 1);
+  // arms flung out, legs splayed: all flattened
+  const limb = (x, z, ang, len, r, m) => {
+    const g = new THREE.CylinderGeometry(r, r * 0.85, len, 7); g.rotateX(Math.PI / 2); g.translate(0, 0, len / 2);
+    const o = add(g, m, x, r * 0.35, z, ang, 1.45, 0.35, 1);
+    return o;
+  };
+  limb(13, -22, 2.1, 26, 3, skin); limb(-13, -22, -2.3, 26, 3, skin);           // arms flung out
+  limb(35.4, -35.1, 1.2, 12, 2.4, skin); limb(-32.5, -39.4, -1.9, 11, 2.4, skin); // forearms bent
+  limb(7, 4, 0.55, 34, 3.8, skin); limb(-7, 4, -0.42, 34, 3.8, skin);           // legs splayed
+  for (const c of root.children) c.userData.y0 = c.position.y;
+  root.scale.setScalar(K);
+  root.visible = false;
+  scene.add(root);
+  return { root, poolB: drapedPool(11), poolH: drapedPool(23) };
+})();
+// Lay each piece of the body onto the facets under it
+function conformCorpse() {
+  const r = corpse.root, v = new THREE.Vector3();
+  r.updateMatrixWorld(true);
+  for (const c of r.children) {
+    c.position.y = 0;
+    r.localToWorld(v.copy(c.position));
+    const gy = hM(v.x / K, v.z / K) * K;
+    c.position.y = c.userData.y0 + Math.max(0, (gy - v.y) / K) + 0.4;
+  }
+}
+// A puddle that drapes over the facets as it spreads
+function drapedPool(seed) {
+  const SEG = 28, RINGS = 4, rnd = mulberry(seed), rad = [];
+  for (let i = 0; i < SEG; i++) rad.push(0.7 + rnd() * 0.45 + (rnd() < 0.25 ? rnd() * 0.5 : 0));
+  const pos = new Float32Array((1 + SEG * RINGS) * 3), idx = [];
+  for (let k = 0; k < RINGS; k++) for (let i = 0; i < SEG; i++) {
+    const a = 1 + k * SEG + i, b = 1 + k * SEG + (i + 1) % SEG;
+    if (k === 0) idx.push(0, b, a);
+    else { const c = a - SEG, d = b - SEG; idx.push(c, d, a, d, b, a); }
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute("position", new THREE.BufferAttribute(pos, 3)); g.setIndex(idx);
+  const m = new THREE.Mesh(g, poolMat); m.visible = false; m.frustumCulled = false; m.receiveShadow = true;
+  scene.add(m);
+  return { m, rad, SEG, RINGS,
+    set(cx, cz, size, sx = 1) {      // center and radius in sim units
+      const p = g.attributes.position;
+      p.setXYZ(0, cx * K, (hM(cx, cz) + 0.6) * K, cz * K);
+      for (let k = 0; k < RINGS; k++) for (let i = 0; i < SEG; i++) {
+        const a = i / SEG * Math.PI * 2, rr = size * rad[i] * (k + 1) / RINGS;
+        const x = cx + Math.cos(a) * rr * sx, z = cz + Math.sin(a) * rr;
+        p.setXYZ(1 + k * SEG + i, x * K, (hM(x, z) + 0.6) * K, z * K);
+      }
+      p.needsUpdate = true; g.computeVertexNormals(); g.computeBoundingSphere();
+      m.visible = true;
+    } };
+}
+
+// Blood droplets and the splats they leave
+const drops = [], splats = [];
+{
+  const g = new THREE.IcosahedronGeometry(1, 0), m = new THREE.MeshStandardMaterial({ color: BLOOD, roughness: 0.2 });
+  for (let i = 0; i < 320; i++) { const o = new THREE.Mesh(g, m); o.visible = false; scene.add(o); drops.push({ o, v: new THREE.Vector3(), on: false }); }
+  const sm = new THREE.MeshStandardMaterial({ color: 0x5e0606, roughness: 0.15, metalness: 0.15,
+    polygonOffset: true, polygonOffsetFactor: -3, polygonOffsetUnits: -3 });
+  for (let i = 0; i < 180; i++) { const o = new THREE.Mesh(blobGeo(100 + i, 10), sm); o.visible = false; scene.add(o); splats.push(o); }
+}
+let dropIdx = 0, splatIdx = 0;
+const _up = new THREE.Vector3(0, 1, 0), _n = new THREE.Vector3(), _w = new THREE.Vector3();
+function groundNormal(x, z, out) {
+  const g = meshGrad(x, z, 8);
+  return out.set(-g.x, 1, -g.z).normalize();
+}
+function spurt(p, dir, n, speed, spread) {     // world coords (meters)
+  for (let i = 0; i < n; i++) {
+    const d = drops[dropIdx++ % drops.length];
+    d.on = true; d.o.visible = true;
+    d.o.position.copy(p);
+    const s = 0.05 + Math.random() * 0.09; d.o.scale.set(s, s * (1 + Math.random()), s);
+    d.v.set(dir.x + (Math.random() - 0.5) * spread, dir.y + (Math.random() - 0.5) * spread * 0.6, dir.z + (Math.random() - 0.5) * spread)
+       .normalize().multiplyScalar(speed * (0.55 + Math.random() * 0.6));
+  }
+}
+function splat(x, z, size) {   // x, z in sim units
+  const o = splats[splatIdx++ % splats.length];
+  groundNormal(x, z, _n);
+  o.position.set(x * K, hM(x, z) * K + 0.02, z * K);
+  o.quaternion.setFromUnitVectors(_up, _n);
+  o.rotateY(Math.random() * 6.28);
+  o.scale.set(size * K, 1, size * K * (0.7 + Math.random() * 0.6));
+  o.visible = true;
+}
+function clearGore() {
+  for (const d of drops) { d.on = false; d.o.visible = false; }
+  for (const o of splats) o.visible = false;
+  corpse.root.visible = false;
+  corpse.poolB.m.visible = corpse.poolH.m.visible = false;
+}
+
+function startDeath() {
+  // he falls on his back, head away from the boulder, and it rolls on top of him
+  let fx = B.x - P.x, fz = B.z - P.z;
+  const fl = Math.hypot(fx, fz) || 1; fx /= fl; fz /= fl;
+  const rest = { x: P.x - fx * 8, z: P.z - fz * 8 };
+  death = { t: 0, real: 0, fx, fz, cx: P.x, cz: P.z, from: { x: B.x, z: B.z }, rest, beat: 0, shown: false };
+  // orient the body on the slope
+  const n = groundNormal(P.x, P.z, new THREE.Vector3());
+  const f = new THREE.Vector3(fx, 0, fz); f.addScaledVector(n, -f.dot(n)).normalize();
+  const xax = new THREE.Vector3().crossVectors(n, f);
+  corpse.root.quaternion.setFromRotationMatrix(new THREE.Matrix4().makeBasis(xax, n, f));
+  corpse.root.position.set(P.x * K, (hM(P.x, P.z) + 0.6) * K, P.z * K);
+  corpse.root.visible = true;
+  conformCorpse();
+  const hp = deathPoint(0, 0, -38);
+  death.head = { x: hp.x / K, z: hp.z / K };
+  // the burst: blood sprays out all around the boulder
+  for (let i = 0; i < 14; i++) {
+    const a = Math.random() * Math.PI * 2;
+    const p = deathPoint(Math.cos(a) * 16, 3, -8 + Math.sin(a) * 16);
+    spurt(p, _w.set(Math.cos(a), 0.9, Math.sin(a)).applyQuaternion(corpse.root.quaternion), 9, 7.5, 0.9);
+  }
+  spurt(deathPoint(0, 2, -36), _w.set(0, 1, 0).add(new THREE.Vector3(-fx, 0, -fz)), 30, 8, 1.2);
+  sfx.splat();
+}
+function deathPoint(lx, ly, lz) { return corpse.root.localToWorld(new THREE.Vector3(lx, ly, lz)); }
+
+function updateDeath(dt) {
+  if (!death) return;
+  death.real += dt;
+  const sdt = dt * (death.real < 0.9 ? 0.3 : 1);    // slow motion as it lands
+  death.t += sdt;
+  const t = death.t;
+  // the boulder rolls up onto the body and stops
+  const a = smooth(t / 0.16);
+  const px = B.x, pz = B.z;
+  B.x = lerp(death.from.x, death.rest.x, a); B.z = lerp(death.from.z, death.rest.z, a);
+  const mv = Math.hypot(B.x - px, B.z - pz);
+  if (mv > 1e-4) { _axis.set((B.z - pz) / mv, 0, -(B.x - px) / mv); _q.setFromAxisAngle(_axis, mv / R); B.q.premultiply(_q); }
+  // heartbeat spurts from the head and from under the boulder, fading out
+  death.beat -= sdt;
+  if (death.beat <= 0 && t < 3.2) {
+    death.beat = 0.38;
+    const k = 1 - t / 3.4;
+    const side = Math.random() < 0.5 ? 1 : -1;
+    spurt(deathPoint(side * 15, 3, -6 + Math.random() * 10), _w.set(side, 1.3, 0).applyQuaternion(corpse.root.quaternion), Math.round(14 * k) + 3, 6.5 * k + 2, 0.7);
+    spurt(deathPoint(0, 2, -37), _w.set(Math.random() - 0.5, 1.5, -0.6).applyQuaternion(corpse.root.quaternion), Math.round(10 * k) + 2, 5 * k + 1.5, 0.8);
+  }
+  // pools spread
+  corpse.poolB.set(death.rest.x, death.rest.z, 1 + 52 * (1 - Math.exp(-t / 1.6)));
+  corpse.poolH.set(death.head.x, death.head.z, 1 + 26 * (1 - Math.exp(-t / 1.2)));
+  // droplets fly, fall and splat
+  for (const d of drops) {
+    if (!d.on) continue;
+    d.v.y -= 22 * sdt;
+    d.o.position.addScaledVector(d.v, sdt);
+    const sx = d.o.position.x / K, sz = d.o.position.z / K;
+    if (d.o.position.y < hM(sx, sz) * K) {
+      d.on = false; d.o.visible = false;
+      if (Math.random() < 0.55) splat(sx, sz, 1.5 + Math.random() * 4.5);
+    }
+  }
+  if (!death.shown && death.real > 2.4) { death.shown = true; showOverlay(); }
+}
+
+// ---------------------------------------------------------------------------
+// Per-frame visual sync
+// ---------------------------------------------------------------------------
+// Keep the head out of the boulder and put the hands on its surface
+const _hv = new THREE.Vector3(), _bw = new THREE.Vector3();
+function fitToBoulder(bc, reach) {
+  const h = hero;
+  _bw.set(bc.x * K, bc.y * K, bc.z * K);
+  const clearHead = (R + 8) * K;
+  h.root.updateMatrixWorld(true);
+  const headD = () => h.head.getWorldPosition(_hv).distanceTo(_bw);
+  if (headD() < clearHead) {
+    // straighten up until the head clears it...
+    while (h.torso.rotation.x > -0.25 && headD() < clearHead) {
+      h.torso.rotation.x -= 0.04; h.torso.updateMatrixWorld(true);
+    }
+    // ...or, failing that, stand a little further back
+    const d = headD();
+    if (d < clearHead) {
+      const hx = P.x - bc.x, hz = P.z - bc.z, hl = Math.hypot(hx, hz) || 1;
+      h.root.position.x += hx / hl * (clearHead - d); h.root.position.z += hz / hl * (clearHead - d);
+      h.root.updateMatrixWorld(true);
+    }
+  }
+  if (!reach) return;
+  for (const [arm, hand] of [[h.armL, h.handL], [h.armR, h.handR]]) {
+    let best = arm.rotation.x, be = 1e9;
+    for (let a = -0.3; a >= -3.1; a -= 0.07) {
+      arm.rotation.x = a; arm.updateMatrixWorld(true);
+      const e = Math.abs(hand.getWorldPosition(_hv).distanceTo(_bw) - (R + 1.5) * K);
+      if (e < be - 1e-4) { be = e; best = a; }
+      else if (be < 3 * K) break;    // take the first place the hands meet the rock
+    }
+    arm.rotation.x = best; arm.updateMatrixWorld(true);
+  }
+}
+
+const camPos = new THREE.Vector3(), camLook = new THREE.Vector3();
+let camInit = false, camYaw = 0;
+function syncVisuals(dt) {
+  const bc = bCenter();
+  const now = performance.now() / 1000;
+
+  // Boulder
+  boulder.position.set(bc.x * K, (bc.y + (death ? 2.5 * smooth(death.t / 0.16) : 0)) * K, bc.z * K);
+  boulder.quaternion.copy(B.q);
+  if (B.teeterT >= 0) boulder.position.x += Math.sin(now * 38) * 0.04;
+
+  // Player
+  const h = hero;
+  h.root.visible = !P.crushed;
+  h.root.position.set(P.x * K, (hM(P.x, P.z) + P.jy) * K, P.z * K);
+  h.root.rotation.y = P.yaw;
+  const ducking = P.duckT > 0 || P.under;
+  let lean = 0.06, armX = 0, armX2 = 0, legA = 0, legB = 0, crouch = 1;
+  const sw = Math.sin(P.phase);
+  const strain = B.teeterT >= 0 && Math.hypot(B.x - P.x, B.z - P.z) < R + PW + 6;
+  if (ducking) {
+    crouch = 0.5; lean = 1.1; armX = armX2 = -2.6; legA = legB = -0.3;
+  } else if (P.jy > 0.5) {
+    legA = -1.1; legB = 0.4; armX = armX2 = -2.8; lean = 0.2;
+  } else if (P.contact || strain) {
+    lean = P.pushing ? 0.85 : 0.65;
+    armX = armX2 = -1.85 - lean;
+    if (strain) { armX += Math.sin(now * 45) * 0.12; armX2 -= Math.sin(now * 45) * 0.12; }
+    legA = 0.45 + (P.pushing ? sw * 0.45 : 0.15); legB = 0.45 - (P.pushing ? sw * 0.45 : 0.15);
+  } else {
+    lean = P.moving ? 0.15 : 0.04;
+    legA = P.moving ? sw * 0.6 : 0; legB = -legA;
+    armX = -legA * 0.8; armX2 = legA * 0.8;
+  }
+  h.body.scale.set(1, crouch, 1);
+  h.torso.rotation.x = lean;
+  h.armL.rotation.x = armX; h.armR.rotation.x = armX2;
+  h.legL.rotation.x = legA; h.legR.rotation.x = legB;
+  if (!P.crushed && !P.under) fitToBoulder(bc, P.contact || strain);
+
+  // Dust
+  for (const d of dustPool) {
+    if (!d.o.visible) continue;
+    d.t += dt;
+    if (d.t > d.life) { d.o.visible = false; continue; }
+    d.o.position.addScaledVector(d.v, dt);
+    d.v.y -= 2 * dt;
+  }
+
+  // Camera: behind the player looking up toward the peak,
+  // pulled back far enough to keep the boulder in view
+  // locked behind him: when he turns, the world turns
+  camYaw = P.heading;
+  const fx = Math.sin(camYaw), fz = Math.cos(camYaw);
+  const behind = Math.min(0, (B.x - P.x) * fx + (B.z - P.z) * fz);
+  const back = 240 - behind;
+  const cx = P.x - fx * back, cz = P.z - fz * back;
+  const cy = Math.max(hM(P.x, P.z) + 140, hM(cx, cz) + 60);
+  const lx = P.x + fx * 170, lz = P.z + fz * 170;
+  const tPos = new THREE.Vector3(cx * K, cy * K, cz * K);
+  const gP = hM(P.x, P.z);
+  const tLook = new THREE.Vector3(lx * K, (gP + 30 + 0.45 * (hM(lx, lz) - gP)) * K, lz * K);   // don't tilt up so far you lose sight of him
+  const k = camInit ? 1 - Math.exp(-dt * 4) : 1;
+  camInit = true;
+  if (!death) {
+    // follow rigidly around and along; only ease the height so the facets don't jolt it
+    camPos.set(tPos.x, lerp(camPos.y, tPos.y, k), tPos.z);
+    camLook.set(tLook.x, lerp(camLook.y, tLook.y, k), tLook.z);
+  }
+  camera.position.copy(camPos);
+  if (shake > 0) camera.position.add(new THREE.Vector3(Math.random() - 0.5, Math.random() - 0.5, 0).multiplyScalar(shake * 0.02));
+  camera.lookAt(camLook);
+  if (state === "crushed" && death) {
+    // circle slowly around the remains
+    const ang = Math.atan2(-death.fx, -death.fz) + 0.55 + death.t * 0.12;
+    const d = lerp(190, 150, smooth(death.t / 3)), gy = hM(death.cx, death.cz);
+    const ox = death.cx - death.fx * 14, oz = death.cz - death.fz * 14;
+    const tp = new THREE.Vector3((ox + Math.sin(ang) * d) * K, 0, (oz + Math.cos(ang) * d) * K);
+    tp.y = Math.max(gy + 120, hM(tp.x / K, tp.z / K) + 60) * K;
+    const kk = 1 - Math.exp(-dt * 2.5);
+    camPos.lerp(tp, kk); camLook.lerp(new THREE.Vector3(ox * K, (gy + 8) * K, oz * K), kk);
+    camera.position.copy(camPos);
+    if (shake > 0) camera.position.add(new THREE.Vector3(Math.random() - 0.5, Math.random() - 0.5, 0).multiplyScalar(shake * 0.02));
+    camera.lookAt(camLook);
+  }
+  if (state === "title") {
+    // Establishing shot: slowly circle the whole mountain
+    const a = -Math.PI / 2 + Math.sin(now * 0.08) * 0.9, d = (rFoot + 900) * K, top = profileAt(cfg.length) * VERT * K;
+    camera.position.set(Math.cos(a) * d, top * 1.1 + 12, Math.sin(a) * d);
+    camera.lookAt(0, top * 0.4, 0);
+    camInit = false;
+  }
+  sky.position.copy(camera.position);
+
+  tintU.uB.value.set(B.x * K, B.z * K);
+  sunLight.target.position.set(P.x * K, hM(P.x, P.z) * K, P.z * K);
+  sunLight.position.copy(sunLight.target.position).add(new THREE.Vector3(-30, 50, 40));
+}
+
+// ---------------------------------------------------------------------------
+// HUD / overlays
+// ---------------------------------------------------------------------------
+const $ = id => document.getElementById(id);
+function updateHUD() {
+  $("hud").style.display = state === "title" ? "none" : "block";
+  $("lvl").textContent = `Level ${level}`;
+  $("stats").textContent = `Time ${stats.t.toFixed(1)}s · Slips ${stats.slips}`;
+  $("alt").textContent = `Altitude ${Math.max(0, Math.round(hM(B.x, B.z) / 10))} / ${Math.round(profileAt(cfg.length) * VERT / 10)} m`;
+
+  // Steepness gauge: under the boulder, and a little ahead in the direction you'd push
+  const scale = LIMIT * 1.35;
+  const s = steepAt(B.x, B.z);
+  let ax = B.x - P.x, az = B.z - P.z;
+  const al = Math.hypot(ax, az);
+  if (al > R + PW + 30 || al < 1) { ax = P.fx; az = P.fz; } else { ax /= al; az /= al; }
+  const sa = steepAt(B.x + ax * 70, B.z + az * 70);
+  const frac = v => clamp(v / scale, 0, 1) * 100;
+  $("sfill").style.width = Math.max(3, frac(s)) + "%";
+  $("sfill").style.background = s > LIMIT ? "#e0563f" : s > LIMIT - 4 ? "#e3c14d" : "#7fc66b";
+  $("stick").style.left = frac(LIMIT) + "%";
+  $("sdanger").style.left = frac(LIMIT) + "%";
+  $("ahead").style.left = frac(sa) + "%";
+  $("slbl").textContent = `SLOPE ${Math.round(s)}° · ahead ${Math.round(sa)}° · limit ${Math.round(LIMIT)}°`;
+
+  // arrow pointing toward the summit, relative to the way you face
+  const toPeak = Math.atan2(-P.x, -P.z);
+  $("compass").style.transform = `rotate(${(P.heading - toPeak) * DEG}deg)`;
+  const prog = clamp(uOf(B.x, B.z) / cfg.length, 0, 1);
+  $("pfill").style.width = prog * 100 + "%";
+  $("ppct").textContent = Math.round(prog * 100) + "%";
+  $("flash").style.opacity = flash * 0.5;
+}
+
+function showOverlay() {
+  const ov = $("overlay"), p = $("panel");
+  if (state === "play") { ov.style.display = "none"; return; }
+  ov.style.display = "flex";
+  if (state === "title") {
+    p.innerHTML = `<h1>SISYPHUS</h1>
+      <p class="sub">Push the boulder to the top of the mountain. Forever.</p><br>
+      <p><kbd>W</kbd> forward — push the boulder &nbsp; <kbd>S</kbd> back &nbsp; <kbd>A</kbd> <kbd>D</kbd> sidestep</p>
+      <p><kbd>Q</kbd> <kbd>E</kbd> or <kbd>←</kbd> <kbd>→</kbd> turn — steer the boulder while pushing</p>
+      <p><kbd>SPACE</kbd> jump — leap back over the boulder</p>
+      <p><kbd>SHIFT</kbd> duck — only for a split second, so time it</p><br>
+      <p class="small">Push it onto ground that's too steep and it slips back down on you.</p>
+      <p class="small">Duck the instant it hits — or get out of its way.</p>
+      <p class="small">Bands of cliffs ring the mountain. Worn ramps climb across each one, but most hide a</p>
+      <p class="small">stretch too steep to pass. Find the one that goes. <kbd>T</kbd> shows too-steep ground near the boulder.</p>
+      <p class="go">${bestLevel > 1 ? `SPACE to begin · C to continue at level ${bestLevel}` : "Press SPACE to begin"}</p>`;
+  } else if (state === "paused") {
+    p.innerHTML = `<h2>Paused</h2><p class="go">P or ESC to resume · R to restart level</p>`;
+  } else if (state === "crushed") {
+    p.innerHTML = `<h2 style="color:#e0563f">CRUSHED</h2>
+      <p class="sub">The boulder got away from him on ground too steep to hold.</p>
+      <p class="go">SPACE to start the climb again</p>`;
+  } else if (state === "won") {
+    p.innerHTML = `<h2 style="color:#ffdf6b">Level ${level} conquered</h2>
+      <p>Time ${stats.t.toFixed(1)}s · Slips ${stats.slips}</p>
+      <p class="sub">The gods frown. The mountain grows.</p>
+      <p class="small">“One must imagine Sisyphus happy.” — Camus</p>
+      <p class="go">SPACE for level ${level + 1}</p>`;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Input & loop
+// ---------------------------------------------------------------------------
+window.addEventListener("keydown", e => {
+  audio();
+  if (["Space", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"].includes(e.code)) e.preventDefault();
+  keys[e.code] = true;
+  if (e.repeat) return;
+  const go = e.code === "Space" || e.code === "Enter";
+  if (e.code === "KeyT") { tint = !tint; applyTint(); }
+  if (state === "title") {
+    if (go) startLevel(1);
+    else if (e.code === "KeyC" && bestLevel > 1) startLevel(bestLevel);
+  } else if (state === "crushed" && go && death && death.real > 1) {
+    startLevel(level);
+  } else if (state === "won" && go) {
+    startLevel(level + 1);
+  } else if (state === "play") {
+    if (e.code === "Space") tryJump();
+    else if (e.code === "ShiftLeft" || e.code === "ShiftRight") tryDuck();
+    else if (e.code === "KeyP" || e.code === "Escape") state = "paused";
+  } else if (state === "paused") {
+    if (e.code === "KeyP" || e.code === "Escape") state = "play";
+    else if (e.code === "KeyR") startLevel(level);
+  }
+  showOverlay();
+});
+window.addEventListener("keyup", e => { keys[e.code] = false; });
+window.addEventListener("blur", () => {
+  for (const k in keys) keys[k] = false;
+  if (state === "play") { state = "paused"; showOverlay(); }
+});
+
+// Title screen shows level 1 in the background
+startLevel(1); state = "title"; showOverlay();
+
+function renderFrame(dt) {
+  shake = Math.max(0, shake - dt * 30);
+  flash = Math.max(0, flash - dt * 1.5);
+  syncVisuals(dt);
+  updateHUD();
+  renderer.render(scene, camera);
+}
+
+let last = performance.now();
+function frame(now) {
+  const dt = Math.min(0.05, (now - last) / 1000);
+  last = now;
+  const steps = Math.ceil(dt / (1 / 120));
+  for (let i = 0; i < steps; i++) update(dt / steps);
+  if (state === "crushed") updateDeath(dt);
+  renderFrame(dt);
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
