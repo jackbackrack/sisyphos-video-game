@@ -31,6 +31,11 @@
   #panel p { margin: 6px 0; font-size: 16px; color: #e9dcc8; }
   #panel .sub { font-style: italic; color: #cdbca3; }
   #panel .small { font-size: 14px; color: #cdbca3; }
+  #overlay.low { align-items: flex-end; background: none; padding-bottom: 14px; pointer-events: none; }
+  #overlay.low #panel { padding: 8px 22px; max-width: 900px; background: rgba(34,22,30,0.75); border-width: 1px; }
+  #overlay.low #panel h2 { font-size: 22px; margin: 0 0 2px; }
+  #overlay.low #panel p { margin: 2px 0; font-size: 13px; }
+  #overlay.low #panel .go { margin-top: 4px; font-size: 15px; }
   #panel .go { margin-top: 18px; font-weight: bold; font-size: 18px; animation: blink 1s steps(2) infinite; }
   #panel kbd { display: inline-block; min-width: 18px; padding: 1px 6px; border: 1px solid #8a7a66; border-radius: 4px; background: #2a1c22; font-family: inherit; font-size: 13px; }
   @keyframes blink { 50% { color: #ffdf6b; } }
@@ -1421,6 +1426,8 @@ function showOverlay() {
   const ov = $("overlay"), p = $("panel");
   if (state === "play") { ov.style.display = "none"; return; }
   ov.style.display = "flex";
+  ov.classList.toggle("low", state === "crushed");   // keep the death scene in view
+  $("hint").style.display = state === "crushed" ? "none" : "block";
   if (state === "title") {
     p.innerHTML = `<h1>SISYPHUS</h1>
       <p class="sub">Push the boulder to the top of the mountain. Forever.</p><br>
