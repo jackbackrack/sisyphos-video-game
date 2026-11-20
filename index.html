@@ -633,7 +633,13 @@ function update(dt) {
   const airborne = P.jy > 0.5;
 
   // Q / E turn you; everything else is relative to the way you face
-  P.heading -= turnIn * TURN * dt;   // E = clockwise seen from above
+  const dTurn = -turnIn * TURN * dt;   // E = clockwise seen from above
+  P.heading += dTurn;
+  // up against the boulder, turning walks you around it, so you're always set to push the way you face
+  if (dTurn && !airborne && B.teeterT < 0 && !B.loose && Math.hypot(B.x - P.x, B.z - P.z) <= R + PW + 3) {
+    const ox = P.x - B.x, oz = P.z - B.z, c = Math.cos(dTurn), sn = Math.sin(dTurn);
+    P.x = B.x + ox * c + oz * sn; P.z = B.z - ox * sn + oz * c;
+  }
   P.fx = Math.sin(P.heading); P.fz = Math.cos(P.heading);
   const fx = P.fx, fz = P.fz, rx = -fz, rz = fx;        // right = forward × up
   const fwdIn = (kW ? 1 : 0) - (kS ? 1 : 0), latIn = (kD ? 1 : 0) - (kA ? 1 : 0);
@@ -743,8 +749,8 @@ function update(dt) {
       const up = Math.max(0, gp.x * ix + gp.z * iz);
       sp = (fwdIn > 0 ? RUN_MAX : fwdIn < 0 ? WALK_BACK : STRAFE) / (1 + 0.8 * up);
       if (ducking) sp *= 0.3;
-      P.yaw = P.heading;            // always face forward: A / D sidestep, S backs up
     }
+    P.yaw = P.heading;              // always face forward, even standing still: A / D sidestep, S backs up
     // you get up to a walk in a step or two, then build speed the longer you keep running
     {
       let cur = Math.hypot(P.vx, P.vz), vx = cur > 1e-6 ? P.vx / cur : 0, vz = cur > 1e-6 ? P.vz / cur : 0;
