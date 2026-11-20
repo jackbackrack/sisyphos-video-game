@@ -49,7 +49,7 @@
     <div class="track"><div id="sdanger"></div><div id="sfill"></div><div class="tick" id="stick"></div><div id="ahead"></div></div>
     <div class="legend">bar = under the boulder · white line = just ahead · red = too steep</div></div>
   <div id="progBox" class="box"><div class="row"><span>Uphill</span><span id="compass" style="display:inline-block;font-size:20px;line-height:16px;font-family:sans-serif;color:#ffdf6b">&#x2191;</span></div></div>
-  <div id="hint">W forward · S back · A D sidestep · Q E (or ← →) turn · push the boulder the way you face · SPACE jump · SHIFT duck · P pause</div>
+  <div id="hint">W forward · S back · A D sidestep · Q E (or ← →) turn · push the boulder the way you face · SPACE jump · SHIFT duck · H hood · P pause</div>
 </div>
 <div id="flash"></div>
 <div id="overlay"><div id="panel"></div></div>
@@ -1218,32 +1218,187 @@ const boulder = (() => {
   return m;
 })();
 
-// Player figure, built in sim units then scaled by K
+// Player figure, built in sim units then scaled by K. Front is +z.
+const cloth = (c, rough = 0.85, extra = {}) => new THREE.MeshStandardMaterial(Object.assign({ color: c, roughness: rough }, extra));
+// Lots of little blobs (curls of hair, tufts of fur) merged into one mesh with their own colors
+const BLOB = new THREE.IcosahedronGeometry(1, 1), RINGLET = new THREE.TorusGeometry(1, 0.42, 5, 8);
+const TUFT = new THREE.ConeGeometry(1, 1, 6, 1).translate(0, 0.5, 0);   // a tuft of fur, base at the origin
+function clumpMesh(list, rough = 0.8) {
+  const pos = [], nor = [], col = [];
+  const m = new THREE.Matrix4(), q = new THREE.Quaternion(), e = new THREE.Euler(), v = new THREE.Vector3(), nm = new THREE.Matrix3();
+  const cache = new Map();
+  for (const c of list) {
+    const geo = c.geo || BLOB;
+    let base = cache.get(geo); if (!base) cache.set(geo, base = geo.index ? geo.toNonIndexed() : geo);
+    const bp = base.attributes.position, bn = base.attributes.normal;
+    m.compose(v.set(c.x, c.y, c.z), c.q || q.setFromEuler(e.set(c.rx || 0, c.ry || 0, c.rz || 0)), new THREE.Vector3(c.sx, c.sy, c.sz));
+    nm.getNormalMatrix(m);
+    for (let i = 0; i < bp.count; i++) {
+      v.fromBufferAttribute(bp, i).applyMatrix4(m); pos.push(v.x, v.y, v.z);
+      v.fromBufferAttribute(bn, i).applyMatrix3(nm).normalize(); nor.push(v.x, v.y, v.z);
+      col.push(c.c.r, c.c.g, c.c.b);
+    }
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute("position", new THREE.Float32BufferAttribute(pos, 3));
+  g.setAttribute("normal", new THREE.Float32BufferAttribute(nor, 3));
+  g.setAttribute("color", new THREE.Float32BufferAttribute(col, 3));
+  const mesh = new THREE.Mesh(g, new THREE.MeshStandardMaterial({ vertexColors: true, roughness: rough }));
+  mesh.castShadow = true;
+  return mesh;
+}
+const HAIR_ROOT = new THREE.Color(0x8a6236), HAIR_TIP = new THREE.Color(0xf0c878);
+const FUR_DARK = new THREE.Color(0x5c4632), FUR_LIGHT = new THREE.Color(0xd8bf92);
+// Big golden curls: darker at the roots, sun-bleached toward the ends
+function curls(rnd, n, cx, cy, cz, flat = 1) {
+  const out = [];
+  for (let i = 0; i < n; i++) {
+    let dx = rnd() * 2 - 1, dy = rnd() * 2 - 1, dz = rnd() * 2 - 1;
+    const l = Math.hypot(dx, dy, dz) || 1; dx /= l; dy /= l; dz /= l;
+    const k = 0.72 + rnd() * 0.33;
+    let x = dx * 15 * k, y = dy * (dy < 0 ? 18 : 12.5) * k, z = dz * (dz > 0 ? 6.5 : 11) * k;
+    if (Math.abs(x) < 7.5 && z > -1 && y > -9 && y < 3.2) { i--; continue; }   // leave the face clear (curls come down over the forehead)
+    const t = clamp(0.55 - y / 24 + (k - 0.85) * 1.5 + (rnd() - 0.5) * 0.3, 0, 1);   // lower and further out = blonder
+    const inner = i % 5 === 0;                                                     // a soft mass underneath...
+    const r = inner ? 2.4 + rnd() * 1.2 : 1.2 + rnd() * 0.8;                       // ...covered in little ringlets
+    out.push({ x: cx + x * (inner ? 0.8 : 1), y: cy + y * flat * (inner ? 0.85 : 1), z: cz + z * (inner ? 0.8 : 1), geo: inner ? BLOB : RINGLET,
+               sx: r, sy: r * (inner ? 1 : 1.25) * flat, sz: r, rx: rnd() * 6, ry: rnd() * 6, rz: rnd() * 6,
+               c: HAIR_ROOT.clone().lerp(HAIR_TIP, inner ? t * 0.6 : t).multiplyScalar(0.88 + rnd() * 0.24), front: z > -2 && y < 3 });
+  }
+  return out;
+}
+// A ring of fur tufts bristling outward (and forward by fwd) around an ellipse
+const _UP = new THREE.Vector3(0, 1, 0);
+function furRing(rnd, n, cx, cy, cz, rx, ry, depth, fwd = 0.6, len = 5.5) {
+  const out = [];
+  for (let i = 0; i < n; i++) {
+    const a = rnd() * Math.PI * 2, w = 0.8 + rnd() * 0.35;
+    const lx = Math.cos(a) * rx * w, ly = Math.sin(a) * ry * w, lz = (rnd() - 0.5) * depth;
+    const d = new THREE.Vector3(Math.cos(a) + (rnd() - 0.5) * 0.7, Math.sin(a) + (rnd() - 0.5) * 0.7, fwd + (rnd() - 0.5) * 0.8).normalize();
+    const r = 0.45 + rnd() * 0.5;
+    out.push({ x: cx + lx, y: cy + ly, z: cz + lz, sx: r, sy: len * (0.5 + rnd() * 0.8), sz: r,
+               q: new THREE.Quaternion().setFromUnitVectors(_UP, d), geo: TUFT, c: FUR_DARK.clone().lerp(FUR_LIGHT, rnd()) });
+  }
+  return out;
+}
+// The shirt's print: a cheerful pink bar of soap with a speech bubble
+function shirtPrint() {
+  const cv = document.createElement("canvas"); cv.width = cv.height = 128;
+  const g = cv.getContext("2d");
+  g.fillStyle = "#e88a96"; g.strokeStyle = "#d4606e"; g.lineWidth = 4;
+  g.beginPath(); g.roundRect ? g.roundRect(14, 34, 46, 60, 12) : g.rect(14, 34, 46, 60); g.fill(); g.stroke();
+  g.fillStyle = "#f2e6ea"; g.beginPath(); g.arc(37, 30, 9, 0, 7); g.arc(48, 28, 7, 0, 7); g.fill();
+  g.strokeStyle = "#e07a88"; g.lineWidth = 3;
+  g.beginPath(); g.moveTo(14, 50); g.lineTo(4, 34); g.moveTo(60, 50); g.lineTo(70, 34); g.moveTo(28, 94); g.lineTo(26, 112); g.moveTo(46, 94); g.lineTo(48, 112); g.stroke();
+  g.fillStyle = "#c04858"; g.beginPath(); g.arc(30, 58, 2.5, 0, 7); g.arc(44, 58, 2.5, 0, 7); g.fill();
+  g.fillStyle = "#ece4e6"; g.beginPath(); g.arc(98, 46, 24, 0, 7); g.fill();
+  g.fillStyle = "#d4606e"; g.font = "bold 11px sans-serif"; g.textAlign = "center";
+  ["~~~", "~~ ~~", "~~~~"].forEach((s, i) => g.fillText(s, 98, 38 + i * 10));
+  const t = new THREE.CanvasTexture(cv); t.encoding = THREE.sRGBEncoding;
+  return t;
+}
+let hoodUp = store.get("sisyphus.hood", false);
 const hero = (() => {
-  const skin = mat(0xd9a27a), tunic = mat(0xe8e2d0), hair = mat(0x3a2a24), belt = mat(0x8a5a3a);
+  const rnd = mulberry(1109);
+  const skin = cloth(0xe9bca0, 0.7), jeans = cloth(0x8e9080, 0.95), jeansLight = cloth(0xb7b49c, 0.95);
+  const jacket = cloth(0x7b7368, 0.55), jacketDark = cloth(0x5f584f, 0.7), shirt = cloth(0x26304f, 0.9);
+  const boot = cloth(0x17171a, 0.45), sole = cloth(0x2b2724, 0.8), cord = cloth(0x2c55a8, 0.5);
+  const silver = cloth(0xc8c8c4, 0.3, { metalness: 0.9 }), onyx = cloth(0x0c0c10, 0.2);
+  const pack = cloth(0x8cba52, 0.3), packDark = cloth(0x76a442, 0.4), steel = cloth(0xc4c7cb, 0.3, { metalness: 0.85 }), wood = cloth(0xcaa46c, 0.7);
+  const eye = cloth(0x5a7280, 0.3), brow = cloth(0x5a3c22, 0.9), lip = cloth(0xc98a80, 0.6);
   const root = new THREE.Group(), body = new THREE.Group();
   root.add(body);
-  const mk = (geo, m, parent, x, y, z) => { const o = new THREE.Mesh(geo, m); o.position.set(x, y, z); o.castShadow = true; parent.add(o); return o; };
+  const mk = (geo, m, parent, x, y, z, sx = 1, sy = 1, sz = 1) => { const o = new THREE.Mesh(geo, m); o.position.set(x, y, z); o.scale.set(sx, sy, sz); o.castShadow = true; parent.add(o); return o; };
   const limb = (parent, x, y, len, r, m) => {
     const piv = new THREE.Group(); piv.position.set(x, y, 0); parent.add(piv);
-    mk(new THREE.CylinderGeometry(r, r * 0.85, len, 7), m, piv, 0, -len / 2, 0);
+    mk(new THREE.CylinderGeometry(r, r * 0.9, len, 10), m, piv, 0, -len / 2, 0);
     return piv;
   };
-  const legL = limb(body, 5, 24, 24, 3.2, skin), legR = limb(body, -5, 24, 24, 3.2, skin);
+  // legs: faded, ripped jeans and chunky black boots wrapped in blue cord
+  const leg = side => {
+    const piv = limb(body, 5 * side, 24, 24, 3.5, jeans);
+    mk(new THREE.BoxGeometry(4.2, 3.2, 0.8), skin, piv, 0, -12, 3.1);                 // knee showing through the rip
+    mk(new THREE.BoxGeometry(5, 0.6, 0.9), jeansLight, piv, 0, -10.2, 3.2);           // frayed edges
+    mk(new THREE.BoxGeometry(5, 0.6, 0.9), jeansLight, piv, 0, -13.8, 3.1);
+    mk(new THREE.CylinderGeometry(3.8, 3.9, 2, 10), jeansLight, piv, 0, -19.5, 0);    // frayed cuff
+    mk(new THREE.BoxGeometry(7, 5.2, 11.5), boot, piv, 0, -23, 1.8);
+    mk(new THREE.BoxGeometry(7.4, 1.6, 12), sole, piv, 0, -25, 1.8);
+    const c = mk(new THREE.TorusGeometry(3.9, 0.35, 6, 16), cord, piv, 0, -21.5, 0.6); c.rotation.x = Math.PI / 2 + 0.25;
+    mk(new THREE.CylinderGeometry(0.5, 0.5, 1.6, 6), silver, piv, 1.2 * side, -21.5, 4.4);
+    return piv;
+  };
+  const legL = leg(1), legR = leg(-1);
+  mk(new THREE.BoxGeometry(14, 6, 9), jeans, body, 0, 24, 0);                          // hips
   const torso = new THREE.Group(); torso.position.y = 24; body.add(torso);
-  mk(new THREE.BoxGeometry(16, 24, 10), tunic, torso, 0, 12, 0);
-  mk(new THREE.CylinderGeometry(9, 12, 12, 8), tunic, torso, 0, 1, 0);
-  mk(new THREE.BoxGeometry(17, 3, 11), belt, torso, 0, 8, 0);
-  const head = mk(new THREE.SphereGeometry(7, 10, 8), skin, torso, 0, 32, 1);
-  const hr = mk(new THREE.SphereGeometry(7.4, 10, 8, 0, Math.PI * 2, 0, Math.PI * 0.55), hair, torso, 0, 33, -0.5);
-  hr.rotation.x = -0.3;
-  const armL = limb(torso, 10.5, 22, 22, 2.6, skin), armR = limb(torso, -10.5, 22, 22, 2.6, skin);
+  // navy t-shirt under an open taupe jacket
+  mk(new THREE.BoxGeometry(14.5, 22, 8.5), shirt, torso, 0, 12, 0.3);
+  const print = new THREE.Mesh(new THREE.PlaneGeometry(9, 9), new THREE.MeshStandardMaterial({ map: shirtPrint(), transparent: true, roughness: 0.9 }));
+  print.position.set(-0.5, 12, 4.6); torso.add(print);
+  mk(new THREE.BoxGeometry(17, 23.5, 2.6), jacket, torso, 0, 12, -4.6);                 // back
+  for (const s of [1, -1]) {
+    mk(new THREE.BoxGeometry(4.2, 23.5, 10.5), jacket, torso, 6.9 * s, 12, 0.1);        // fronts, hanging open
+    mk(new THREE.BoxGeometry(0.6, 22, 0.6), jacketDark, torso, 4.8 * s, 12, 5.4);       // zip edge
+  }
+  mk(new THREE.BoxGeometry(17.4, 2.2, 11), jacketDark, torso, 0, 0.6, -0.2);            // ribbed hem
+  mk(new THREE.BoxGeometry(17.4, 3, 11), jacket, torso, 0, 22.5, -0.2);                 // shoulders
+  // silver bib necklace and a dark pendant on a long chain
+  const bib = mk(new THREE.TorusGeometry(4.6, 0.3, 6, 18, Math.PI), silver, torso, 0, 22.4, 4.7); bib.rotation.z = Math.PI;
+  for (let i = 0; i < 11; i++) {
+    const a = Math.PI + (i + 0.5) / 11 * Math.PI, len = 1.4 + 1.6 * Math.sin((i + 0.5) / 11 * Math.PI);
+    mk(new THREE.CylinderGeometry(0.22, 0.22, len, 4), silver, torso, Math.cos(a) * 4.6, 22.4 + Math.sin(a) * 4.6 - len / 2, 4.85);
+  }
+  mk(new THREE.CylinderGeometry(0.12, 0.12, 10, 4), silver, torso, 1.2, 15.5, 4.8);
+  mk(new THREE.SphereGeometry(1, 10, 8), onyx, torso, 1.2, 10.2, 5.0);
+  mk(new THREE.TorusGeometry(1.1, 0.25, 5, 12), silver, torso, 1.2, 10.2, 4.95);
+  // green dinosaur backpack with its spines, and a water bottle in the side pocket
+  mk(new THREE.SphereGeometry(1, 20, 14), pack, torso, 0, 11, -8.8, 9.5, 12.5, 4.6);
+  [[19, 1.9], [14.5, 2.2], [9.5, 2.5], [3.5, 3.0]].forEach(([y, r]) => mk(new THREE.SphereGeometry(1, 12, 10), packDark, torso, 0, y, -12.6 + r * 0.2, r * 0.9, r, r * 1.05));
+  for (const s of [1, -1]) mk(new THREE.BoxGeometry(2.4, 1.2, 11), pack, torso, 5 * s, 23.6, -0.5);   // straps
+  mk(new THREE.CylinderGeometry(1.5, 1.5, 9, 12), steel, torso, 9.2, 8, -8.5);
+  mk(new THREE.CylinderGeometry(1.5, 1.5, 1.6, 12), wood, torso, 9.2, 13.2, -8.5);
+  // head
+  mk(new THREE.CylinderGeometry(2.4, 2.6, 4, 10), skin, torso, 0, 25.5, 0.6);
+  const head = mk(new THREE.SphereGeometry(6.2, 18, 14), skin, torso, 0, 31.5, 1, 1, 1.13, 1);
+  for (const s of [1, -1]) {
+    mk(new THREE.SphereGeometry(0.75, 8, 6), eye, torso, 2.3 * s, 32.6, 6.7);
+    mk(new THREE.BoxGeometry(2.6, 0.5, 0.6), brow, torso, 2.3 * s, 34.3, 6.6);
+  }
+  const nose = mk(new THREE.ConeGeometry(0.9, 2.4, 6), skin, torso, 0, 30.8, 7.4); nose.rotation.x = Math.PI / 2 - 0.4;
+  mk(new THREE.BoxGeometry(2.6, 0.5, 0.5), lip, torso, 0, 28.2, 6.6);
+  // hair: a huge mass of curls; with the hood up only the ones spilling out the front show
+  const hairList = curls(rnd, 520, 0, 31.5, -1);
+  const hairFront = clumpMesh(hairList.filter(c => c.front)), hairBack = clumpMesh(hairList.filter(c => !c.front));
+  torso.add(hairFront, hairBack);
+  // the hood: down, it's a fur ruff bunched behind the neck; up, it frames the face
+  const hoodMat = new THREE.MeshStandardMaterial({ color: 0x8a8474, roughness: 0.55, side: THREE.DoubleSide });
+  const hoodDown = new THREE.Group(); torso.add(hoodDown);
+  mk(new THREE.TorusGeometry(7, 2.8, 8, 16, Math.PI * 1.3), hoodMat, hoodDown, 0, 24.5, -2).rotation.set(Math.PI / 2, 0, Math.PI * 0.7);
+  hoodDown.add(clumpMesh(furRing(rnd, 500, 0, 25.5, -3, 10, 2, 4, 0, 4).map(c => { const y = c.y - 25.5; c.y = 25.5 + y * 0.3; c.z = -3 + y * 3.5; return c; }).filter(c => c.z < 4)));
+  const hoodOn = new THREE.Group(); torso.add(hoodOn);
+  // a deep hood reaching forward past the face...
+  const shell = new THREE.Mesh(new THREE.SphereGeometry(10, 24, 16, Math.PI / 2 + 0.75, Math.PI * 2 - 1.5, 0, Math.PI * 0.82), hoodMat);
+  shell.position.set(0, 31, 1); shell.scale.set(1.2, 1.25, 1.5); shell.castShadow = true; hoodOn.add(shell);
+  // ...ringed with a big ruff of fur sticking out in front, like a tunnel
+  hoodOn.add(clumpMesh(furRing(rnd, 900, 0, 31.5, 11.5, 10.5, 12, 8, 0.45, 4.8)));
+  hoodOn.add(clumpMesh(furRing(rnd, 500, 0, 31.5, 9, 12.5, 14, 6, 0.1, 3.8)));
+  // and the curls that won't fit pour out of the bottom, down the chest
+  const spill = curls(rnd, 160, 0, 18, 6.5).map(c => { c.x *= 0.55; c.z = 5.5 + Math.abs(c.z) * 0.35; return c; }).filter(c => c.y < 27);
+  hoodOn.add(clumpMesh(spill));
+  const setHood = up => { hoodOn.visible = up; hoodDown.visible = !up; hairBack.visible = !up; };
+  setHood(hoodUp);
+  const armL = limb(torso, 10.5, 22, 21, 3.1, jacket), armR = limb(torso, -10.5, 22, 21, 3.1, jacket);
+  for (const a of [armL, armR]) { mk(new THREE.CylinderGeometry(2.7, 2.7, 2, 10), jacketDark, a, 0, -20.5, 0); mk(new THREE.SphereGeometry(2.4, 10, 8), skin, a, 0, -23, 0, 0.9, 1.15, 0.7); }
   const handL = new THREE.Object3D(), handR = new THREE.Object3D();
   handL.position.y = handR.position.y = -23; armL.add(handL); armR.add(handR);
+  root.traverse(o => { if (o.isMesh) o.receiveShadow = true; });
   root.scale.setScalar(K);
   scene.add(root);
-  return { root, body, torso, head, legL, legR, armL, armR, handL, handR };
+  return { root, body, torso, head, legL, legR, armL, armR, handL, handR, setHood };
 })();
+function toggleHood() {
+  hoodUp = !hoodUp; store.set("sisyphus.hood", hoodUp);
+  hero.setHood(hoodUp);
+}
 
 // Dust particles
 const dustPool = [];
@@ -1282,19 +1437,21 @@ function blobGeo(seed, n = 22) {
   return g;
 }
 const corpse = (() => {
-  const skin = mat(0xc98d6a), tunic = mat(0xd6cdb8), hair = mat(0x3a2a24), belt = mat(0x8a5a3a);
+  const skin = cloth(0xdcae92, 0.7), shirt = cloth(0x26304f, 0.9), jacket = cloth(0x7b7368, 0.55), jeans = cloth(0x8e9080, 0.95), boot = cloth(0x17171a, 0.45);
   const flesh = new THREE.MeshStandardMaterial({ color: 0x8c1414, roughness: 0.3, flatShading: true });
   const root = new THREE.Group();   // local: y = ground normal, +z = toward where the boulder came from
   const add = (geo, m, x, y, z, ry = 0, sx = 1, sy = 1, sz = 1) => {
     const o = new THREE.Mesh(geo, m); o.position.set(x, y, z); o.rotation.y = ry; o.scale.set(sx, sy, sz);
     o.castShadow = true; o.receiveShadow = true; root.add(o); return o;
   };
-  // flattened torso, spread wide under the boulder
-  add(new THREE.BoxGeometry(26, 2.2, 30), tunic, 0, 1.1, -10);
-  add(new THREE.BoxGeometry(27, 2.4, 3.5), belt, 0, 1.3, 3);
+  // flattened torso, spread wide under the boulder: navy shirt, jacket splayed open
+  add(new THREE.BoxGeometry(20, 2.2, 30), shirt, 0, 1.1, -10);
+  add(new THREE.BoxGeometry(7, 2.6, 31), jacket, 13, 1.2, -10, -0.08); add(new THREE.BoxGeometry(7, 2.6, 31), jacket, -13, 1.2, -10, 0.08);
+  add(new THREE.BoxGeometry(24, 2.4, 6), jeans, 0, 1.3, 4);
   add(new THREE.IcosahedronGeometry(11, 1), flesh, 1, 1.2, -5, 0.4, 1.25, 0.16, 1.05);   // burst open
-  // squashed head, face up, burst open
-  add(new THREE.SphereGeometry(7, 12, 8), hair, 0.8, 0.8, -42, 0.3, 2.0, 0.2, 1.4);
+  // squashed head, face up, burst open, in a flattened spray of curls
+  const hairMesh = clumpMesh(curls(mulberry(77), 160, 0, 0, 0, 0.18).map(c => Object.assign(c, { x: c.x * 1.5, z: c.z * 1.2 - 3, y: c.y + 1 })));
+  hairMesh.position.set(0, 0.8, -41); hairMesh.rotation.x = 0; root.add(hairMesh);
   add(new THREE.SphereGeometry(7, 12, 8), skin, 0, 1.4, -36, 0, 1.8, 0.24, 1.45);
   const dark = mat(0x1a0c0c);
   add(new THREE.BoxGeometry(4.5, 1, 1.2), dark, -4, 3, -37, 0.785); add(new THREE.BoxGeometry(4.5, 1, 1.2), dark, -4, 3, -37, -0.785);   // X eyes
@@ -1307,9 +1464,12 @@ const corpse = (() => {
     const o = add(g, m, x, r * 0.35, z, ang, 1.45, 0.35, 1);
     return o;
   };
-  limb(13, -22, 2.1, 26, 3, skin); limb(-13, -22, -2.3, 26, 3, skin);           // arms flung out
+  limb(13, -22, 2.1, 26, 3.2, jacket); limb(-13, -22, -2.3, 26, 3.2, jacket);   // arms flung out
   limb(35.4, -35.1, 1.2, 12, 2.4, skin); limb(-32.5, -39.4, -1.9, 11, 2.4, skin); // forearms bent
-  limb(7, 4, 0.55, 34, 3.8, skin); limb(-7, 4, -0.42, 34, 3.8, skin);           // legs splayed
+  limb(7, 4, 0.55, 34, 3.9, jeans); limb(-7, 4, -0.42, 34, 3.9, jeans);           // legs splayed
+  // boots at the ends of the legs
+  add(new THREE.BoxGeometry(7, 4.5, 11), boot, 7 + 37 * Math.sin(0.55), 2.2, 4 + 37 * Math.cos(0.55), 0.55);
+  add(new THREE.BoxGeometry(7, 4.5, 11), boot, -7 + 37 * Math.sin(-0.42), 2.2, 4 + 37 * Math.cos(-0.42), -0.42);
   for (const c of root.children) c.userData.y0 = c.position.y;
   root.scale.setScalar(K);
   root.visible = false;
@@ -1648,7 +1808,8 @@ function showOverlay() {
       <p><kbd>W</kbd> forward — push the boulder &nbsp; <kbd>S</kbd> back &nbsp; <kbd>A</kbd> <kbd>D</kbd> sidestep</p>
       <p><kbd>Q</kbd> <kbd>E</kbd> or <kbd>←</kbd> <kbd>→</kbd> turn — steer the boulder while pushing</p>
       <p><kbd>SPACE</kbd> jump — leap back over the boulder</p>
-      <p><kbd>SHIFT</kbd> duck — only for a split second, so time it</p><br>
+      <p><kbd>SHIFT</kbd> duck — only for a split second, so time it</p>
+      <p><kbd>H</kbd> hood up / down</p><br>
       <p class="small">Push it onto ground that's too steep and it slips back down on you.</p>
       <p class="small">Duck the instant it hits — or get out of its way.</p>
       <p class="small">The mountain never ends. Bands of cliffs cross it, higher and steeper as you climb.</p>
@@ -1676,6 +1837,7 @@ window.addEventListener("keydown", e => {
   keys[e.code] = true;
   if (e.repeat) return;
   const go = e.code === "Space" || e.code === "Enter";
+  if (e.code === "KeyH") toggleHood();
   if (state === "title") {
     if (go) newGame();
   } else if (state === "crushed" && death && death.real > 1 && (go || e.code === "KeyR")) {
