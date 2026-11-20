@@ -147,7 +147,7 @@ function noise(dur, vol = 0.3, freq = 400, delay = 0) {
   src.connect(f).connect(g).connect(ac.destination);
   src.start(ac.currentTime + delay);
 }
-// Recorded voice: effort grunts and death screams (see CREDITS.md)
+// Recorded voice: effort grunts and death screams, recorded for this game
 const clips = { grunt: [], scream: [], wheels: [], rumble: [] }, lastClip = {};
 let clipsLoading = false;
 // Your own takes, recorded on record.html, replace the built-in ones (kind by kind)
@@ -2089,7 +2089,7 @@ function showOverlay() {
       <p class="small">There are endless ways up, but only a few go all the way. Read the rock and choose.</p>
       ${bestH > 0 ? `<p class="small">Highest so far: ${bestH} m</p>` : ""}
       <p class="go">Press SPACE to begin</p>
-      <p class="small" style="font-size:11px;margin-top:14px">Voices: VoiceBosch (CC-BY-SA 4.0), creativeheroes, thanvannispen, JohnsonBrandEditing (CC-BY 3.0) — see CREDITS.md</p>`;
+`;
   } else if (state === "paused") {
     p.innerHTML = `<h2>Paused</h2><p class="go">P or ESC to resume · R to start again from the bottom</p>`;
   } else if (state === "crushed") {
