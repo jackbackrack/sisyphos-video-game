@@ -1,0 +1,191 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sisyphus voice</title>
+<style>
+  html, body { margin: 0; background: #120d18; color: #f3e6cf; font-family: Georgia, serif; }
+  main { max-width: 760px; margin: 0 auto; padding: 28px 16px 60px; }
+  h1 { font-size: 34px; margin: 0 0 6px; letter-spacing: 1px; }
+  p { color: #e0d2bc; line-height: 1.5; }
+  .small { font-size: 14px; color: #cdbca3; }
+  section { background: rgba(34,22,30,0.95); border: 1px solid #6e5a48; border-radius: 14px; padding: 18px 20px; margin-top: 20px; }
+  h2 { margin: 0 0 4px; font-size: 24px; }
+  button { font-family: inherit; font-size: 15px; border-radius: 8px; border: 1px solid #c59a6a; background: #2a1c22; color: #f3e6cf; padding: 7px 14px; cursor: pointer; }
+  button:hover { background: #3a2830; }
+  button.rec { background: #8c2a22; border-color: #e0563f; font-weight: bold; }
+  button.rec.on { background: #e0563f; color: #120d18; }
+  button:disabled { opacity: 0.45; cursor: default; }
+  .meter { height: 8px; background: #2a1c22; border-radius: 4px; overflow: hidden; margin: 10px 0 4px; }
+  .meter div { height: 100%; width: 0; background: #7fc66b; }
+  ul { list-style: none; padding: 0; margin: 12px 0 0; }
+  li { display: flex; gap: 8px; align-items: center; padding: 6px 0; border-top: 1px solid #3a2a2a; flex-wrap: wrap; }
+  li .name { flex: 1; min-width: 120px; }
+  .bar { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+  a { color: #ffdf6b; }
+  #err { color: #ff8a70; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Sisyphus's voice</h1>
+  <p>Record your own grunts and screams for the game. Each take is trimmed and levelled automatically.
+     The game uses your takes instead of the built-in ones, in this browser, as soon as you go back to it.</p>
+  <p class="small">To put them in the shared version of the game, download the takes you like (or all of them) and send the files over to be bundled in.
+     <a href="index.html">Back to the game</a></p>
+  <p id="err"></p>
+
+  <section data-kind="grunt">
+    <h2>Grunts</h2>
+    <p class="small">Short effort sounds as you shove the boulder: “hnngh”, “ugh”, “hrrrh”. Record several (6–12 is good) so they vary.</p>
+    <div class="bar"><button class="rec">● Record</button><span class="hint small">click to start, click again to stop</span></div>
+    <div class="meter"><div></div></div>
+    <ul></ul>
+  </section>
+
+  <section data-kind="scream">
+    <h2>Screams</h2>
+    <p class="small">The death scream as the boulder rolls over you. One to two seconds each; a few different ones.</p>
+    <div class="bar"><button class="rec">● Record</button><span class="hint small">click to start, click again to stop</span></div>
+    <div class="meter"><div></div></div>
+    <ul></ul>
+  </section>
+
+  <section>
+    <div class="bar">
+      <button id="dlAll">Download all takes</button>
+      <button id="clearAll">Delete all takes (back to the built-in voice)</button>
+    </div>
+  </section>
+</main>
+<script>
+"use strict";
+// Takes live in this browser's IndexedDB, where the game picks them up
+const DB = "sisyphus-voice";
+function db() {
+  return new Promise((ok, bad) => {
+    const r = indexedDB.open(DB, 1);
+    r.onupgradeneeded = () => r.result.createObjectStore("clips", { keyPath: "id", autoIncrement: true });
+    r.onsuccess = () => ok(r.result); r.onerror = () => bad(r.error);
+  });
+}
+async function tx(mode, fn) {
+  const d = await db();
+  return new Promise((ok, bad) => {
+    const t = d.transaction("clips", mode), st = t.objectStore("clips");
+    const req = fn(st);
+    t.oncomplete = () => ok(req && req.result); t.onerror = () => bad(t.error);
+  });
+}
+const allClips = () => tx("readonly", st => st.getAll());
+const addClip = c => tx("readwrite", st => st.add(c));
+const delClip = id => tx("readwrite", st => st.delete(id));
+
+let AC = null;
+const ac = () => AC || (AC = new (window.AudioContext || window.webkitAudioContext)());
+
+// Trim the silence off both ends, level it, and turn it into a WAV file
+function processTake(buf) {
+  const sr = buf.sampleRate, n = buf.length, mono = new Float32Array(n);
+  for (let c = 0; c < buf.numberOfChannels; c++) { const d = buf.getChannelData(c); for (let i = 0; i < n; i++) mono[i] += d[i] / buf.numberOfChannels; }
+  let pk = 0; for (let i = 0; i < n; i++) pk = Math.max(pk, Math.abs(mono[i]));
+  if (pk < 0.01) return null;
+  const th = pk * 0.06;
+  let s = 0; while (s < n && Math.abs(mono[s]) < th) s++;
+  let e = n - 1; while (e > s && Math.abs(mono[e]) < th) e--;
+  s = Math.max(0, s - Math.round(sr * 0.03)); e = Math.min(n, e + Math.round(sr * 0.15));
+  const out = mono.slice(s, e), k = 0.9 / pk, fade = Math.round(sr * 0.008);
+  for (let i = 0; i < out.length; i++) {
+    let g = k;
+    if (i < fade) g *= i / fade;
+    if (i > out.length - fade) g *= (out.length - i) / fade;
+    out[i] *= g;
+  }
+  return wav(out, sr);
+}
+function wav(f, sr) {
+  const b = new ArrayBuffer(44 + f.length * 2), v = new DataView(b);
+  const w = (o, s) => { for (let i = 0; i < s.length; i++) v.setUint8(o + i, s.charCodeAt(i)); };
+  w(0, "RIFF"); v.setUint32(4, 36 + f.length * 2, true); w(8, "WAVE"); w(12, "fmt ");
+  v.setUint32(16, 16, true); v.setUint16(20, 1, true); v.setUint16(22, 1, true); v.setUint32(24, sr, true);
+  v.setUint32(28, sr * 2, true); v.setUint16(32, 2, true); v.setUint16(34, 16, true); w(36, "data"); v.setUint32(40, f.length * 2, true);
+  for (let i = 0; i < f.length; i++) v.setInt16(44 + i * 2, Math.max(-1, Math.min(1, f[i])) * 32767, true);
+  return new Blob([b], { type: "audio/wav" });
+}
+function play(blob) { const a = new Audio(URL.createObjectURL(blob)); a.play(); }
+function download(blob, name) {
+  const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = name; document.body.appendChild(a); a.click(); a.remove();
+}
+const fname = c => `${c.kind}-${c.id}.wav`;
+
+async function render() {
+  const clips = await allClips();
+  for (const sec of document.querySelectorAll("section[data-kind]")) {
+    const kind = sec.dataset.kind, ul = sec.querySelector("ul");
+    ul.innerHTML = "";
+    const mine = clips.filter(c => c.kind === kind);
+    if (!mine.length) { ul.innerHTML = `<li class="small">No takes yet — the game uses its built-in ${kind}s.</li>`; continue; }
+    mine.forEach((c, i) => {
+      const li = document.createElement("li");
+      li.innerHTML = `<span class="name">${kind} ${i + 1} <span class="small">(${c.dur.toFixed(2)} s)</span></span>`;
+      const b = (label, fn) => { const x = document.createElement("button"); x.textContent = label; x.onclick = fn; li.appendChild(x); };
+      b("▶ Play", () => play(c.blob));
+      b("Download", () => download(c.blob, fname(c)));
+      b("Delete", async () => { await delClip(c.id); render(); });
+      ul.appendChild(li);
+    });
+  }
+}
+
+let stream = null;
+async function mic() {
+  if (stream) return stream;
+  stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: false, noiseSuppression: true, autoGainControl: false } });
+  return stream;
+}
+for (const sec of document.querySelectorAll("section[data-kind]")) {
+  const kind = sec.dataset.kind, btn = sec.querySelector(".rec"), meter = sec.querySelector(".meter div");
+  let rec = null, chunks = [], raf = 0;
+  btn.onclick = async () => {
+    try {
+      if (rec) { rec.stop(); return; }
+      const s = await mic();
+      const an = ac().createAnalyser(); an.fftSize = 512;
+      const src = ac().createMediaStreamSource(s); src.connect(an);
+      const data = new Float32Array(an.fftSize);
+      const tick = () => { an.getFloatTimeDomainData(data); let m = 0; for (const x of data) m = Math.max(m, Math.abs(x)); meter.style.width = Math.min(100, m * 120) + "%"; meter.style.background = m > 0.95 ? "#e0563f" : "#7fc66b"; raf = requestAnimationFrame(tick); };
+      tick();
+      chunks = []; rec = new MediaRecorder(s);
+      rec.ondataavailable = e => chunks.push(e.data);
+      rec.onstop = async () => {
+        cancelAnimationFrame(raf); meter.style.width = "0"; src.disconnect();
+        btn.classList.remove("on"); btn.textContent = "● Record"; rec = null;
+        const raw = new Blob(chunks, { type: chunks[0] && chunks[0].type });
+        const buf = await ac().decodeAudioData(await raw.arrayBuffer());
+        const blob = processTake(buf);
+        if (!blob) { document.getElementById("err").textContent = "That take was silent — check the microphone."; return; }
+        document.getElementById("err").textContent = "";
+        await addClip({ kind, blob, dur: (blob.size - 44) / 2 / buf.sampleRate, at: Date.now() });
+        render();
+        play(blob);
+      };
+      rec.start();
+      btn.classList.add("on"); btn.textContent = "■ Stop";
+    } catch (e) {
+      document.getElementById("err").textContent = "Couldn't use the microphone: " + e.message;
+    }
+  };
+}
+document.getElementById("dlAll").onclick = async () => {
+  for (const c of await allClips()) { download(c.blob, fname(c)); await new Promise(r => setTimeout(r, 300)); }
+};
+document.getElementById("clearAll").onclick = async () => {
+  if (!confirm("Delete all your takes?")) return;
+  for (const c of await allClips()) await delClip(c.id);
+  render();
+};
+render().catch(e => { document.getElementById("err").textContent = "Couldn't open storage: " + e.message; });
+</script>
+</body>
+</html>
