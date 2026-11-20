@@ -221,7 +221,7 @@ function ensureBands(u) {
     const tanT = Math.tan(b.roadDeg / DEG), tanC = Math.tan(b.camberDeg / DEG);
     b.tanA0 = Math.sqrt(tanT * tanT - tanC * tanC);
     // each ramp gets a cell of its own, wide enough that it can't run into the next
-    b.cw = Math.round(Math.max(1000, 2.4 * W * b.tan / b.tanA0 + 2 * (b.roadHalf + ROAD_BANK) + 200));
+    b.cw = Math.round(Math.max(1200, 2.6 * W * b.tan / b.tanA0 + 2 * (b.roadHalf + ROAD_BANK) + 300));
     BANDS.push(b);
   }
 }
@@ -351,13 +351,11 @@ function indexTrail(T) {
     }
   }
 }
-function overlaps(T) {
-  const { xs, zs, tid, trails, grid, gc } = ROAD, clear = 2 * (T.rh + ROAD_BANK) + 20;
-  for (let i = T.start; i < T.end; i += 2) {
-    const list = grid.get(gkey(Math.floor(xs[i] / gc), Math.floor(zs[i] / gc)));
-    if (!list) continue;
-    for (const j of list) if (trails[tid[j]].band === T.band && (xs[i] - xs[j]) ** 2 + (zs[i] - zs[j]) ** 2 < clear * clear) return true;
-  }
+// Each ramp must stay inside its own cell, so neighbors can never meet; this only
+// depends on the ramp itself, so the mountain comes out the same whatever order it's made in
+function strays(T, cellL, cw) {
+  const m = T.rh + ROAD_BANK + 10;
+  for (let i = T.start; i < T.end; i++) if (ROAD.xs[i] < cellL + m || ROAD.xs[i] > cellL + cw - m) return true;
   return false;
 }
 function buildGroup(b, g) {
@@ -369,15 +367,21 @@ function buildGroup(b, g) {
     let kind = null;
     if (i !== sure && r() > b.good) { const q = r(); kind = q < 0.4 ? "steep" : q < 0.8 ? "pinch" : "end"; }
     const cruxU = lerp(b.lo, b.hi, 0.3 + r() * 0.4);
-    const cellL = (g * GROUP + i) * b.cw, m = b.roadHalf + ROAD_BANK + 40 + r() * 50;
-    const x = spin > 0 ? cellL + b.cw - m : cellL + m;
-    const z = b.lo - b.roadHalf - 20 - waveU(x);
-    const T = march(b, x, z, spin, b.hi + b.roadHalf + 30, kind, cruxU, b.hi - (b.hi - b.lo) * 0.3);
-    if (overlaps(T)) {   // runs into another ramp: leave it out
+    const cellL = (g * GROUP + i) * b.cw, m0 = b.roadHalf + ROAD_BANK + 40 + r() * 50;
+    // the sure one gets more tries (winding the other way, starting nearer the edge) rather than be lost
+    const tries = i === sure ? [[spin, m0], [-spin, m0], [spin, b.roadHalf + ROAD_BANK + 12], [-spin, b.roadHalf + ROAD_BANK + 12]] : [[spin, m0]];
+    let T = null;
+    for (const [sp, m] of tries) {
+      const x = sp > 0 ? cellL + b.cw - m : cellL + m;
+      const z = b.lo - b.roadHalf - 20 - waveU(x);
+      T = march(b, x, z, sp, b.hi + b.roadHalf + 30, kind, cruxU, b.hi - (b.hi - b.lo) * 0.3);
+      if (!strays(T, cellL, b.cw)) break;
+      // wanders out of its cell (where it could meet the next ramp): leave it out
       for (const arr of [ROAD.xs, ROAD.zs, ROAD.ys, ROAD.lx, ROAD.lz, ROAD.cam, ROAD.hw, ROAD.tid]) arr.length = T.start;
       ROAD.trails.pop();
-      continue;
+      T = null;
     }
+    if (!T) continue;
     indexTrail(T);
     made.push(T);
   }
@@ -497,8 +501,18 @@ function tri(a, b, c, x, z) {
   const l2 = ((z3 - z1) * (x - x3) + (x1 - x3) * (z - z3)) / det;
   const l3 = 1 - l1 - l2;
   if (l1 < -1e-6 || l2 < -1e-6 || l3 < -1e-6) return null;
-  return l1 * _c[a + 1] + l2 * _c[b + 1] + l3 * _c[c + 1];
+  // each facet is split in four, with its edge midpoints nudged up or down a little
+  const dab = fineD((x1 + x2) / 2, (z1 + z2) / 2), dbc = fineD((x2 + x3) / 2, (z2 + z3) / 2), dca = fineD((x3 + x1) / 2, (z3 + z1) / 2);
+  let d;
+  if (l1 >= 0.5) d = 2 * l2 * dab + 2 * l3 * dca;
+  else if (l2 >= 0.5) d = 2 * l1 * dab + 2 * l3 * dbc;
+  else if (l3 >= 0.5) d = 2 * l1 * dca + 2 * l2 * dbc;
+  else d = (1 - 2 * l3) * dab + (1 - 2 * l1) * dbc + (1 - 2 * l2) * dca;
+  return l1 * _c[a + 1] + l2 * _c[b + 1] + l3 * _c[c + 1] + d;
 }
+// Small-scale roughness: how far each facet's edge midpoint is pushed up or down
+const FINE_D = 6;
+function fineD(x, z) { return FINE_D * (2 * hash2(x * 0.731 + 0.17, z * 0.593 + 0.31) - 1); }
 const NI = [0, -1, 1, 0, 0, -1, 1, -1, 1], NJ = [0, 0, 0, -1, 1, -1, -1, 1, 1];
 function hM(x, z) {
   const i0 = Math.floor(x / FACET), j0 = Math.floor(z / FACET);
@@ -570,9 +584,21 @@ function respawn() {
   spawn(B.x, (lo + hi) / 2 + 30);
 }
 
+// The boulder isn't round: it rests on whichever part of it is lowest against the ground
+// (sampled over its actual outline as it's turned right now)
+const _sq = new THREE.Quaternion(), _sv = new THREE.Vector3(), _sn = new THREE.Vector3();
+function boulderReach(nx, ny, nz) {   // how far it sticks out from its center along -n (sim units)
+  if (!BOULDER_PTS) return R;
+  _sn.set(-nx, -ny, -nz).applyQuaternion(_sq.copy(B.q).invert());   // into the boulder's own frame
+  let best = 0;
+  const P3 = BOULDER_PTS;
+  for (let i = 0; i < P3.length; i += 3) { const d = P3[i] * _sn.x + P3[i + 1] * _sn.y + P3[i + 2] * _sn.z; if (d > best) best = d; }
+  return best;
+}
 function bCenter() {
-  const g = meshGrad(B.x, B.z);
-  return { x: B.x, z: B.z, y: hM(B.x, B.z) + R * Math.sqrt(1 + g.x * g.x + g.z * g.z) };
+  const g = meshGrad(B.x, B.z), l = Math.sqrt(1 + g.x * g.x + g.z * g.z);
+  const nx = -g.x / l, ny = 1 / l, nz = -g.z / l;
+  return { x: B.x, z: B.z, y: hM(B.x, B.z) + boulderReach(nx, ny, nz) / ny };
 }
 
 function slip() {
@@ -832,8 +858,16 @@ const _axis = new THREE.Vector3(), _q = new THREE.Quaternion();
 // ---------------------------------------------------------------------------
 // 3D world
 // ---------------------------------------------------------------------------
+// Colors are written as everyday (sRGB) hex values; light them in linear space
+{
+  const setHex = THREE.Color.prototype.setHex;
+  THREE.Color.prototype.setHex = function (h) { setHex.call(this, h); return this.convertSRGBToLinear(); };
+}
 const renderer = new THREE.WebGLRenderer({ antialias: true });
 renderer.setPixelRatio(Math.min(2, window.devicePixelRatio || 1));
+renderer.outputEncoding = THREE.sRGBEncoding;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;      // film-like highlights and shadows
+renderer.toneMappingExposure = 0.78;
 renderer.shadowMap.enabled = true;
 renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 document.body.insertBefore(renderer.domElement, document.body.firstChild);
@@ -851,13 +885,13 @@ window.addEventListener("resize", resize);
 resize();
 
 // Sky dome
+const SKY_TOP = new THREE.Color(0x2a1a44), SKY_MID = new THREE.Color(0xc8664c), SKY_LOW = new THREE.Color(0xf4c08a);
 const sky = (() => {
   const geo = new THREE.SphereGeometry(5000, 32, 16);
   const cols = [], pos = geo.attributes.position;
-  const top = new THREE.Color(0x2a1a44), mid = new THREE.Color(0xc8664c), low = new THREE.Color(0xf4c08a);
   for (let i = 0; i < pos.count; i++) {
     const t = pos.getY(i) / 5000;
-    const c = t > 0.12 ? mid.clone().lerp(top, Math.min(1, (t - 0.12) / 0.6)) : low.clone().lerp(mid, Math.max(0, (t + 0.05) / 0.17));
+    const c = t > 0.12 ? SKY_MID.clone().lerp(SKY_TOP, Math.min(1, (t - 0.12) / 0.6)) : SKY_LOW.clone().lerp(SKY_MID, Math.max(0, (t + 0.05) / 0.17));
     cols.push(c.r, c.g, c.b);
   }
   geo.setAttribute("color", new THREE.Float32BufferAttribute(cols, 3));
@@ -869,87 +903,199 @@ const sky = (() => {
   return m;
 })();
 
-scene.add(new THREE.HemisphereLight(0xd6dbe6, 0x3a3430, 0.55));
-const sunLight = new THREE.DirectionalLight(0xfff1e0, 1.0);
+scene.add(new THREE.HemisphereLight(0xd6dbe6, 0x4a4038, 0.45));
+// The sun: high, and from up the slope, so cliffs fall into shade and throw it onto the ledges below
+const SUN_DIR = new THREE.Vector3(22, 50, 13).normalize();
+const SHADOW_R = 45;   // meters of shadow around you
+const sunLight = new THREE.DirectionalLight(0xfff1e0, 1.25);
 sunLight.castShadow = true;
-sunLight.shadow.mapSize.set(2048, 2048);
-Object.assign(sunLight.shadow.camera, { left: -14, right: 14, top: 14, bottom: -14, near: 1, far: 120 });
-sunLight.shadow.bias = -0.0008;
+sunLight.shadow.mapSize.set(4096, 4096);
+Object.assign(sunLight.shadow.camera, { left: -SHADOW_R, right: SHADOW_R, top: SHADOW_R, bottom: -SHADOW_R, near: 1, far: 400 });
+sunLight.shadow.bias = -0.0004;
+sunLight.shadow.normalBias = 0.04;
 scene.add(sunLight, sunLight.target);
 
 const mat = c => new THREE.MeshStandardMaterial({ color: c, roughness: 0.95, flatShading: true });
 
-// The rock texture (from a photo of a real boulder), projected from three sides
-// so steep faces don't smear it.
-const rockTex = (() => {
+// The rock texture (from a photo of a real boulder) and the bumps derived from it,
+// projected from three sides so steep faces don't smear them.
+function loadTex(src, srgb) {
   const img = new Image(), t = new THREE.Texture(img);
   img.onload = () => { t.needsUpdate = true; };
-  img.src = window.ROCK_JPG || "assets/rock.jpg";
+  img.src = src;
   t.wrapS = t.wrapT = THREE.MirroredRepeatWrapping;
   t.anisotropy = Math.min(8, renderer.capabilities.getMaxAnisotropy());
+  if (srgb) t.encoding = THREE.sRGBEncoding;
   return t;
-})();
-const SKY_TOP = new THREE.Color(0x2a1a44), SKY_MID = new THREE.Color(0xc8664c), SKY_LOW = new THREE.Color(0xf4c08a);
-const skyU = { uSkyTop: { value: SKY_TOP }, uSkyMid: { value: SKY_MID }, uSkyLow: { value: SKY_LOW } };
+}
+const rockTex = loadTex(window.ROCK_JPG || "assets/rock.jpg", true);
+const rockNrm = loadTex(window.ROCK_NRM || "assets/rock_normal.jpg", false);
+const sharedU = {
+  uSkyTop: { value: SKY_TOP }, uSkyMid: { value: SKY_MID }, uSkyLow: { value: SKY_LOW },
+  uPlayer: { value: new THREE.Vector2() },   // where you are (m): fine detail fades out away from you
+};
 // space "world": the texture is fixed to the ground; "object": it turns with the mesh.
+// smooth: how much the facets' lighting is blended into their neighbors' (0 = hard facets).
 // Far away the rock fades into the sky behind it.
-function rockMaterial({ space = "world", s1 = 1 / 6, s2 = 1 / 23, color = 0xffffff, flat = true, rough = 0.95 } = {}) {
-  const m = new THREE.MeshStandardMaterial({ color, roughness: rough, flatShading: flat });
+function rockMaterial({ space = "world", s1 = 1 / 6, s2 = 1 / 23, color = 0xffffff, rough = 1, smooth = 0.6, bump = 1.0, terrain = false, aoAttr = terrain } = {}) {
+  const m = new THREE.MeshStandardMaterial({ color, roughness: rough });
   m.extensions = { derivatives: true };
+  const own = { uRock: { value: rockTex }, uNrm: { value: rockNrm }, uS: { value: new THREE.Vector2(s1, s2) },
+                uSmooth: { value: smooth }, uBump: { value: bump }, uRot: { value: new THREE.Matrix3() } };
+  m.userData.u = own;
+  m.defines = {};
+  if (terrain) m.defines.TERRAIN = "";
+  if (aoAttr) m.defines.AO_ATTR = "";
   m.onBeforeCompile = sh => {
-    Object.assign(sh.uniforms, skyU, { uRock: { value: rockTex }, uS: { value: new THREE.Vector2(s1, s2) } });
-    sh.vertexShader = "varying vec3 vTP;\nvarying vec3 vWP;\n" + sh.vertexShader.replace("#include <begin_vertex>",
+    Object.assign(sh.uniforms, sharedU, own);
+    sh.vertexShader = `varying vec3 vTP;\nvarying vec3 vTN;\nvarying vec3 vWP;\nvarying float vAO;\nuniform vec2 uPlayer;
+#ifdef AO_ATTR
+attribute float ao;
+#endif
+#ifdef TERRAIN
+attribute float disp;
+#endif
+` + sh.vertexShader.replace("#include <begin_vertex>",
       `#include <begin_vertex>
+  #ifdef TERRAIN
+  // the finer facets near you; they flatten out further away, where they'd only shimmer
+  transformed.y += disp * (1.0 - smoothstep(25.0, 34.0, distance(transformed.xz, uPlayer)));
+  #endif
+  #ifdef AO_ATTR
+  vAO = ao;
+  #else
+  vAO = 1.0;
+  #endif
   vec4 wp4 = vec4(transformed, 1.0);
+  vec3 tn4 = objectNormal;
   #ifdef USE_INSTANCING
   wp4 = instanceMatrix * wp4;
+  tn4 = mat3(instanceMatrix) * tn4;
   #endif
   vWP = (modelMatrix * wp4).xyz;
-  vTP = ${space === "object" ? "transformed" : "vWP"};`);
-    sh.fragmentShader = `uniform sampler2D uRock;\nuniform vec2 uS;\nuniform vec3 uSkyTop;\nuniform vec3 uSkyMid;\nuniform vec3 uSkyLow;
-varying vec3 vTP;\nvarying vec3 vWP;
+  vTP = ${space === "object" ? "transformed" : "vWP"};
+  vTN = ${space === "object" ? "objectNormal" : "normalize(mat3(modelMatrix) * tn4)"};`);
+    sh.fragmentShader = `uniform sampler2D uRock;\nuniform sampler2D uNrm;\nuniform vec2 uS;\nuniform float uSmooth;\nuniform float uBump;\nuniform mat3 uRot;
+uniform vec3 uSkyTop;\nuniform vec3 uSkyMid;\nuniform vec3 uSkyLow;
+varying vec3 vTP;\nvarying vec3 vTN;\nvarying vec3 vWP;\nvarying float vAO;
 vec3 tri3(vec3 p, vec3 w, float s) {
   return texture2D(uRock, p.zy * s).rgb * w.x + texture2D(uRock, p.xz * s).rgb * w.y + texture2D(uRock, p.xy * s).rgb * w.z;
+}
+// slope of the rock's surface from the bump map; the texture repeats mirrored, so flip it to match
+vec2 bumpAt(vec2 uv) {
+  vec2 g = texture2D(uNrm, uv).rg * 2.0 - 1.0;
+  vec2 par = mod(floor(uv), 2.0);
+  return g * (1.0 - 2.0 * par) * vec2(1.0, -1.0);
 }
 vec3 skyAt(float t) {
   return t > 0.12 ? mix(uSkyMid, uSkyTop, min(1.0, (t - 0.12) / 0.6)) : mix(uSkyLow, uSkyMid, clamp((t + 0.05) / 0.17, 0.0, 1.0));
 }
 ` + sh.fragmentShader
       .replace("#include <map_fragment>", `
-  vec3 tn = normalize(cross(dFdx(vTP), dFdy(vTP)));
-  vec3 bw = pow(abs(tn), vec3(4.0)); bw /= (bw.x + bw.y + bw.z);
+  vec3 faceN = normalize(cross(dFdx(vTP), dFdy(vTP)));
+  if (dot(faceN, vTN) < 0.0) faceN = -faceN;
+  vec3 baseN = normalize(mix(faceN, normalize(vTN), uSmooth));
+  vec3 bw = pow(abs(baseN), vec3(4.0)); bw /= (bw.x + bw.y + bw.z);
   vec3 rk = mix(tri3(vTP, bw, uS.x), tri3(vTP + 17.0, bw, uS.y), 0.4);
-  diffuseColor.rgb *= rk * 1.1;`)
+  diffuseColor.rgb *= rk;
+  // tilt the surface by the rock's own bumps, seen from each of the three sides
+  vec2 bx = (bumpAt(vTP.zy * uS.x) + 0.6 * bumpAt((vTP.zy + 17.0) * uS.y)) * uBump;
+  vec2 by = (bumpAt(vTP.xz * uS.x) + 0.6 * bumpAt((vTP.xz + 17.0) * uS.y)) * uBump;
+  vec2 bz = (bumpAt(vTP.xy * uS.x) + 0.6 * bumpAt((vTP.xy + 17.0) * uS.y)) * uBump;
+  vec3 rockN = normalize(baseN - bw.x * vec3(0.0, bx.y, bx.x) - bw.y * vec3(by.x, 0.0, by.y) - bw.z * vec3(bz.x, bz.y, 0.0));`)
+      .replace("#include <normal_fragment_begin>", `
+  float faceDirection = gl_FrontFacing ? 1.0 : - 1.0;
+  vec3 normal = normalize((viewMatrix * vec4(uRot * rockN, 0.0)).xyz);
+  vec3 geometryNormal = normal;`)
+      .replace("#include <aomap_fragment>", `
+  // creases and the foot of each cliff get less light from the sky
+  reflectedLight.indirectDiffuse *= vAO;
+  reflectedLight.directDiffuse *= mix(1.0, vAO, 0.35);`)
       .replace("#include <fog_fragment>", `
   #ifdef USE_FOG
   float fd = length(vWP - cameraPosition);
   float ff = smoothstep(fogNear, fogFar, fd);
-  gl_FragColor.rgb = mix(gl_FragColor.rgb, skyAt(normalize(vWP - cameraPosition).y), ff);
+  vec3 skyC = linearToOutputTexel(vec4(toneMapping(skyAt(normalize(vWP - cameraPosition).y)), 1.0)).rgb;
+  gl_FragColor.rgb = mix(gl_FragColor.rgb, skyC, ff);
   #endif`);
   };
   return m;
 }
-const groundMat = rockMaterial();
-const pebbleMat = rockMaterial({ s1: 1 / 1.5, s2: 1 / 5, color: 0xd8d2cc });
+const groundMat = rockMaterial({ terrain: true, smooth: 0.55, bump: 1.5 });
+const pebbleMat = rockMaterial({ s1: 1 / 1.5, s2: 1 / 5, color: 0xd8d2cc, smooth: 0, bump: 0.7 });
 
-// The ground near you is built in tiles, and thrown away once you're far off
-const VIEW = 6200;   // how far you can see (sim units)
+// The ground near you is built in tiles, and thrown away once you're far off.
+// Tiles close by are drawn with each facet split in four.
+const VIEW = 6200;      // how far you can see (sim units)
+const FINE_IN = 1300, FINE_OUT = 1550;   // tiles nearer than this get the finer facets
 const pebbleGeo = new THREE.DodecahedronGeometry(1, 0);
-function buildTileView(t) {
-  const n = NT + 1, pos = new Float32Array(NT * NT * 6 * 3);
+// Lattice point (gi, gj): position, smooth normal and how shut in it is (ambient occlusion)
+const AO_DIRS = [[1, 0], [-1, 0], [0, 1], [0, -1], [1, 1], [-1, -1], [1, -1], [-1, 1]];
+function latticePoint(gi, gj, out) {
+  corner(0, gi, gj); const x = _c[0], y = _c[1], z = _c[2];
+  corner(0, gi + 1, gj); const xr = _c[0], yr = _c[1], zr = _c[2];
+  corner(0, gi - 1, gj); const xl = _c[0], yl = _c[1], zl = _c[2];
+  corner(0, gi, gj + 1); const xu = _c[0], yu = _c[1], zu = _c[2];
+  corner(0, gi, gj - 1); const xd = _c[0], yd = _c[1], zd = _c[2];
+  // normal = (down->up) x (left->right)
+  const ax = xu - xd, ay = yu - yd, az = zu - zd, bx = xr - xl, by = yr - yl, bz = zr - zl;
+  let nx = ay * bz - az * by, ny = az * bx - ax * bz, nz = ax * by - ay * bx;
+  if (ny < 0) { nx = -nx; ny = -ny; nz = -nz; }
+  const nl = Math.hypot(nx, ny, nz); nx /= nl; ny /= nl; nz /= nl;
+  // how much of the sky the ground around hides, measured against the local slope
+  let occ = 0;
+  for (const [di, dj] of AO_DIRS) {
+    let best = 0;
+    for (const st of [1, 2, 4]) {
+      corner(0, gi + di * st, gj + dj * st);
+      const dx = _c[0] - x, dz = _c[2] - z, d = Math.hypot(dx, dz);
+      const plane = -(nx * dx + nz * dz) / ny;
+      const e = (_c[1] - y - plane) / Math.hypot(d, _c[1] - y - plane);
+      if (e > best) best = e;
+    }
+    occ += best;
+  }
+  out.x = x; out.y = y; out.z = z; out.nx = nx; out.ny = ny; out.nz = nz;
+  out.ao = clamp(1 - 1.4 * occ / AO_DIRS.length, 0.3, 1);
+  return out;
+}
+function buildTileView(t, fine) {
+  const n = NT + 1, L = [];
+  for (let j = 0; j <= NT; j++) for (let i = 0; i <= NT; i++) L.push(latticePoint(t.ti * NT + i, t.tj * NT + j, {}));
+  const tris = NT * NT * 2 * (fine ? 4 : 1);
+  const pos = new Float32Array(tris * 9), nor = new Float32Array(tris * 9), ao = new Float32Array(tris * 3), disp = new Float32Array(tris * 3);
   let o = 0;
-  const put = v => { pos[o++] = t.xs[v] * K; pos[o++] = t.ys[v] * K; pos[o++] = t.zs[v] * K; };
+  const put = (x, y, z, nx, ny, nz, a, d) => {
+    pos[o * 3] = x * K; pos[o * 3 + 1] = y * K; pos[o * 3 + 2] = z * K;
+    nor[o * 3] = nx; nor[o * 3 + 1] = ny; nor[o * 3 + 2] = nz; ao[o] = a; disp[o] = d * K; o++;
+  };
+  const pv = p => put(p.x, p.y, p.z, p.nx, p.ny, p.nz, p.ao, 0);
+  const mid = (p, q) => {
+    const x = (p.x + q.x) / 2, z = (p.z + q.z) / 2;
+    let nx = p.nx + q.nx, ny = p.ny + q.ny, nz = p.nz + q.nz; const l = Math.hypot(nx, ny, nz);
+    return { x, y: (p.y + q.y) / 2, z, nx: nx / l, ny: ny / l, nz: nz / l, ao: (p.ao + q.ao) / 2, d: fineD(x, z) };
+  };
+  const pm = m => put(m.x, m.y, m.z, m.nx, m.ny, m.nz, m.ao, m.d);
+  const face = (p, q, r) => {
+    if (!fine) { pv(p); pv(q); pv(r); return; }
+    const pq = mid(p, q), qr = mid(q, r), rp = mid(r, p);
+    pv(p); pm(pq); pm(rp);  pm(pq); pv(q); pm(qr);  pm(rp); pm(qr); pv(r);  pm(pq); pm(qr); pm(rp);
+  };
   for (let j = 0; j < NT; j++) for (let i = 0; i < NT; i++) {
-    const a = j * n + i, b = a + 1, d = a + n, e = d + 1;
-    if ((t.ti * NT + i + t.tj * NT + j) & 1) { put(a); put(d); put(b); put(b); put(d); put(e); }
-    else { put(a); put(d); put(e); put(a); put(e); put(b); }
+    const a = L[j * n + i], b = L[j * n + i + 1], d = L[(j + 1) * n + i], e = L[(j + 1) * n + i + 1];
+    if ((t.ti * NT + i + t.tj * NT + j) & 1) { face(a, d, b); face(b, d, e); }
+    else { face(a, d, e); face(a, e, b); }
   }
   const geo = new THREE.BufferGeometry();
   geo.setAttribute("position", new THREE.BufferAttribute(pos, 3));
-  geo.computeVertexNormals();
+  geo.setAttribute("normal", new THREE.BufferAttribute(nor, 3));
+  geo.setAttribute("ao", new THREE.BufferAttribute(ao, 1));
+  geo.setAttribute("disp", new THREE.BufferAttribute(disp, 1));
+  geo.computeBoundingSphere();
+  geo.boundingSphere.radius += 1;
   const g = new THREE.Group();
   const ground = new THREE.Mesh(geo, groundMat);
-  ground.receiveShadow = true;
+  ground.receiveShadow = true; ground.castShadow = true;   // cliffs throw shade on the ledges below
   g.add(ground);
   // loose rocks lying about (not on the ramps)
   const rnd = mulberry(gkey(t.ti, t.tj) | 0);
@@ -966,7 +1112,7 @@ function buildTileView(t) {
   rocks.castShadow = true; rocks.receiveShadow = true;
   g.add(rocks);
   scene.add(g);
-  t.view = g;
+  t.view = g; t.fine = fine;
 }
 function dropTileView(t) {
   scene.remove(t.view);
@@ -986,33 +1132,77 @@ function updateTiles(budget) {
   want.sort((a, b) => a[0] - b[0]);
   for (const [d, ti, tj] of want) {
     const t = tileData(ti, tj);
-    if (!t.view) { if (budget-- <= 0) break; buildTileView(t); }
+    const fine = t.view ? (t.fine ? d < FINE_OUT : d < FINE_IN) : d < FINE_IN;
+    if (!t.view || t.fine !== fine) {
+      if (budget-- <= 0) break;
+      if (t.view) dropTileView(t);
+      buildTileView(t, fine);
+    }
   }
   for (const t of TILES.values()) if (t.view && near(t.ti, t.tj) > VIEW + TS) dropTileView(t);
 }
 
-// Boulder: a lumpy, faceted lump of the same rock
+let BOULDER_PTS = null;
+// Boulder: a lumpy lump of the same rock, with smooth-ish curves and bumps of all sizes
 const boulder = (() => {
-  const geo = new THREE.IcosahedronGeometry(R * K, 3);
+  const geo = new THREE.IcosahedronGeometry(R * K, 36);   // ~27k triangles: enough for bumps of every size
   const p = geo.attributes.position, v = new THREE.Vector3();
   const r = mulberry(7);
-  const lobes = Array.from({ length: 7 }, () => ({ d: new THREE.Vector3(r() - 0.5, r() - 0.5, r() - 0.5).normalize(), k: 0.05 + r() * 0.07, p: 2 + r() * 4 }));
-  const seen = new Map();
+  const lobes = Array.from({ length: 8 }, () => ({ d: new THREE.Vector3(r() - 0.5, r() - 0.5, r() - 0.5).normalize(), k: 0.08 + r() * 0.14, p: 1.5 + r() * 4 }));
+  // stretched one way and squashed another, so it has no single round profile
+  const axes = new THREE.Matrix4().makeRotationFromEuler(new THREE.Euler(r() * 6, r() * 6, r() * 6));
+  const stretch = new THREE.Vector3(1.16, 0.86, 1.03), _a = new THREE.Vector3();
+  // a few octaves of wavy bumps, smaller and smaller
+  const waves = [];
+  for (let o = 0; o < 4; o++) for (let i = 0; i < 6; i++)
+    waves.push({ d: new THREE.Vector3(r() - 0.5, r() - 0.5, r() - 0.5).normalize(), f: 3 * Math.pow(2.1, o) * (0.8 + r() * 0.4), a: 0.018 / Math.pow(1.9, o), ph: r() * 6.28 });
+  // a couple of flat-ish broken faces, like the one in the photo
+  const cuts = Array.from({ length: 5 }, () => ({ d: new THREE.Vector3(r() - 0.5, r() - 0.5, r() - 0.5).normalize(), at: 0.82 + r() * 0.07 }));
+  const shape = new Map(), key = v => `${v.x.toFixed(4)},${v.y.toFixed(4)},${v.z.toFixed(4)}`;
   for (let i = 0; i < p.count; i++) {
     v.fromBufferAttribute(p, i);
-    const key = `${v.x.toFixed(3)},${v.y.toFixed(3)},${v.z.toFixed(3)}`;
-    if (!seen.has(key)) {
+    const k = key(v);
+    if (!shape.has(k)) {
       const n = v.clone().normalize();
-      let f = 0.96 + (r() - 0.5) * 0.035;
+      _a.copy(n).applyMatrix4(axes);
+      let f = 0.95 / Math.hypot(_a.x / stretch.x, _a.y / stretch.y, _a.z / stretch.z);
       for (const l of lobes) f += l.k * (Math.pow(Math.max(0, n.dot(l.d)), l.p) - 0.25);
-      seen.set(key, f);
+      for (const w of waves) f += w.a * Math.sin(n.dot(w.d) * w.f + w.ph);
+      for (const c of cuts) { const dn = n.dot(c.d); if (dn > 0.2) f = Math.min(f, lerp(f, c.at / dn, smooth((dn - 0.2) / 0.3))); }
+      shape.set(k, f);
     }
-    v.multiplyScalar(seen.get(key));
-    p.setXYZ(i, v.x, v.y, v.z);
   }
+  // the same overall size as the round boulder the physics knows about
+  let fs = 0; for (const f of shape.values()) fs += f;
+  const fk = shape.size / fs;
+  // which corners touch which, to find hollows: places lower than the surface around them
+  const keys = [], idx = new Map();
+  for (let i = 0; i < p.count; i++) { v.fromBufferAttribute(p, i); const k = key(v); if (!idx.has(k)) { idx.set(k, keys.length); keys.push(k); } }
+  const U = keys.length, nb = Array.from({ length: U }, () => new Set()), vid = new Int32Array(p.count);
+  for (let i = 0; i < p.count; i++) { v.fromBufferAttribute(p, i); vid[i] = idx.get(key(v)); }
+  for (let i = 0; i < p.count; i += 3) for (let a = 0; a < 3; a++) for (let b = 0; b < 3; b++) if (a !== b) nb[vid[i + a]].add(vid[i + b]);
+  const rad = new Float32Array(U); keys.forEach((k, u) => { rad[u] = shape.get(k) * fk; });
+  let sm = Float32Array.from(rad);
+  for (let it = 0; it < 10; it++) { const nx = new Float32Array(U); for (let u = 0; u < U; u++) { let t = sm[u]; for (const w of nb[u]) t += sm[w]; nx[u] = t / (nb[u].size + 1); } sm = nx; }
+  const aoU = new Float32Array(U); for (let u = 0; u < U; u++) aoU[u] = clamp(1 + 9 * (rad[u] - sm[u]), 0.45, 1);
+  const aoA = new Float32Array(p.count);
+  for (let i = 0; i < p.count; i++) { v.fromBufferAttribute(p, i); v.multiplyScalar(rad[vid[i]]); p.setXYZ(i, v.x, v.y, v.z); aoA[i] = aoU[vid[i]]; }
+  geo.setAttribute("ao", new THREE.BufferAttribute(aoA, 1));
+  // a sample of its surface points (sim units) for working out what it's resting on
+  const pts = [], seenP = new Set();
+  for (let i = 0; i < p.count; i++) {
+    const u = vid[i]; if (seenP.has(u) || u % 8) continue; seenP.add(u);
+    v.fromBufferAttribute(p, i); pts.push(v.x / K, v.y / K, v.z / K);
+  }
+  BOULDER_PTS = new Float32Array(pts);
+  // smooth normals: average the faces around each corner
   geo.computeVertexNormals();
-  const m = new THREE.Mesh(geo, rockMaterial({ space: "object", s1: 1 / 1.6, s2: 1 / 3.7, flat: false, rough: 0.9 }));
-  m.castShadow = true;
+  const nsum = new Map(), nr = geo.attributes.normal, nv = new THREE.Vector3();
+  for (let i = 0; i < p.count; i++) { v.fromBufferAttribute(p, i); const k = key(v); const s = nsum.get(k) || new THREE.Vector3(); s.add(nv.fromBufferAttribute(nr, i)); nsum.set(k, s); }
+  for (let i = 0; i < p.count; i++) { v.fromBufferAttribute(p, i); const s = nsum.get(key(v)).clone().normalize(); nr.setXYZ(i, s.x, s.y, s.z); }
+  const m = new THREE.Mesh(geo, rockMaterial({ space: "object", s1: 1 / 1.6, s2: 1 / 3.7, rough: 1, smooth: 0.45, bump: 2.0, aoAttr: true }));
+  m.castShadow = true; m.receiveShadow = true;
+  m.onBeforeRender = () => m.material.userData.u.uRot.value.setFromMatrix4(m.matrixWorld).multiplyScalar(1);
   scene.add(m);
   return m;
 })();
@@ -1392,8 +1582,14 @@ function syncVisuals(dt) {
   }
   sky.position.copy(camera.position);
 
-  sunLight.target.position.set(P.x * K, hM(P.x, P.z) * K, P.z * K);
-  sunLight.position.copy(sunLight.target.position).add(new THREE.Vector3(22, 50, 13));   // high and from up the slope: steep faces fall into shade
+  // the sun's shadow follows you, snapped to its texels so shadow edges don't crawl as you move
+  {
+    const tx = P.x * K, tz = P.z * K, step = 2 * SHADOW_R / sunLight.shadow.mapSize.x * 4;
+    const sx = Math.round(tx / step) * step, sz = Math.round(tz / step) * step;
+    sunLight.target.position.set(sx, hM(sx / K, sz / K) * K, sz);
+    sunLight.position.copy(sunLight.target.position).addScaledVector(SUN_DIR, 150);
+  }
+  sharedU.uPlayer.value.set(P.x * K, P.z * K);
 }
 
 // ---------------------------------------------------------------------------
