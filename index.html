@@ -12,7 +12,7 @@
   #info b { font-size: 18px; }
   #info div { font-size: 13px; color: #cdbca3; margin-top: 4px; }
   #slopeBox { top: 16px; left: 50%; transform: translateX(-50%); width: min(380px, 42vw); text-align: center; }
-  #progBox { top: 16px; right: 16px; width: 200px; }
+  #progBox { top: 16px; right: 16px; width: 120px; }
   .lbl, .row { font-size: 12px; font-weight: bold; }
   .row { display: flex; justify-content: space-between; }
   .track { position: relative; height: 14px; background: #2a1c22; border-radius: 7px; margin-top: 6px; overflow: hidden; }
@@ -39,18 +39,17 @@
 </head>
 <body>
 <div id="hud">
-  <div id="info" class="box"><b id="lvl">Level 1</b><div id="stats"></div><div id="alt"></div></div>
+  <div id="info" class="box"><b id="lvl">Height 0 m</b><div id="stats"></div><div id="alt"></div></div>
   <div id="slopeBox" class="box"><div class="lbl" id="slbl">SLOPE</div>
     <div class="track"><div id="sdanger"></div><div id="sfill"></div><div class="tick" id="stick"></div><div id="ahead"></div></div>
     <div class="legend">bar = under the boulder · white line = just ahead · red = too steep</div></div>
-  <div id="progBox" class="box"><div class="row"><span>Progress to summit</span><span id="ppct">0%</span></div>
-    <div class="row" style="margin-top:6px"><span>Summit</span><span id="compass" style="display:inline-block;font-size:20px;line-height:16px;font-family:sans-serif;color:#ffdf6b">&#x2191;</span></div>
-    <div class="track thin"><div id="pfill"></div></div></div>
-  <div id="hint">W forward · S back · A D sidestep · Q E (or ← →) turn · push the boulder the way you face · SPACE jump · SHIFT duck · T steep-ground tint · P pause</div>
+  <div id="progBox" class="box"><div class="row"><span>Uphill</span><span id="compass" style="display:inline-block;font-size:20px;line-height:16px;font-family:sans-serif;color:#ffdf6b">&#x2191;</span></div></div>
+  <div id="hint">W forward · S back · A D sidestep · Q E (or ← →) turn · push the boulder the way you face · SPACE jump · SHIFT duck · P pause</div>
 </div>
 <div id="flash"></div>
 <div id="overlay"><div id="panel"></div></div>
 <script src="vendor/three.min.js"></script>
+<script src="vendor/rock-texture.js"></script>
 <script>
 "use strict";
 
@@ -62,7 +61,6 @@ const K = 1 / 30;
 const R = 38;              // boulder radius
 const PW = 11;             // player radius
 const PH = 54;             // player height
-const TOP = 60;            // radius of the small rounded top where the boulder can rest
 const VERT = 2.2;          // the mountain is drawn this much steeper than the gameplay slope
 const FACET = 40;          // approximate size of the mountain's facets
 const G = 220;             // gravity for the rolling boulder
@@ -76,31 +74,11 @@ const JUMP_V = 440, JUMP_G = 1000;
 const DUCK_TIME = 0.25;    // a duck only lasts this long...
 const DUCK_COOLDOWN = 0.6; // ...and can't be spammed
 const IMPACT_WINDOW = 0.12;// after a slipping boulder hits you, this long to duck before you're crushed
-const XMIN = -600;
 const DEG = 180 / Math.PI;
 
 const LIMIT = 40;           // the steepest ground (in degrees) the boulder can be pushed on
-function levelCfg(n) {
-  const f = Math.min(1, (n - 1) / 9);   // 0 on level 1 .. 1 by level 10
-  return {
-    n,
-    length: 1400 + 500 * (n - 1),                    // distance up the slope from the foot to the top
-    bands: Math.min(9, 1 + n),                       // rings of cliffs between the ledges
-    ledgeLo: 12, ledgeHi: lerp(24, 30, f),           // ledge steepness at the bottom / top
-    cliffLo: 56, cliffHi: lerp(62, 70, f),           // cliff steepness at the bottom / top
-    bandLo: 40, bandHi: lerp(60, 85, f),             // cliff band height (in distance up the slope)
-    shoulder: 0.15,                                  // how much gentler/steeper the sides of the mountain are
-    twist: 1.6,                                      // how the gentle sides wind around the mountain
-    bumps: 2,                                        // small unevenness
-    roadDeg: lerp(27, 31, f),                        // steepness of a good ramp
-    camberDeg: lerp(3, 7, f),                        // how much a ramp tilts toward its drop-off
-    roadHalf: lerp(70, 56, f),                       // half a ramp's width
-    good: n <= 2 ? 0.45 : lerp(0.35, 0.2, f),        // chance a ramp that isn't the guaranteed one also goes
-    spin: n % 2 ? 1 : -1,
-    maxRoll: 80 + 8 * (n - 1),
-    seed: n * 977 + 13,
-  };
-}
+const SEED = 4242;
+const MAX_ROLL = 95;
 
 // ---------------------------------------------------------------------------
 // Utilities
@@ -166,212 +144,247 @@ const sfx = {
 };
 
 // ---------------------------------------------------------------------------
-// The mountain: a radial profile that gets steeper the higher you go, plus
-// ridges, gullies and uneven ground, so some facets are shallow and some steep.
+// The mountain never ends. u is the distance up the slope: it runs up +z, but
+// the contour lines meander from side to side. Bands of cliffs cross it with
+// gentler ledges between them, and the bands get taller and steeper as you
+// climb. Nothing is built ahead of time: the ground is made a tile at a time
+// as you get near it, always the same for the same place.
 // ---------------------------------------------------------------------------
-let profile, profileN, rFoot, mapS, nP;
-let BANDS = [];
-function buildMountain(cfg) {
-  rFoot = cfg.length + TOP;
-  mapS = Math.round(rFoot * (1 + 1.2 * cfg.shoulder) + 600);
-  profileN = cfg.length + 1400 - XMIN;
-  profile = new Float32Array(profileN + 2);
-  const r = mulberry(cfg.seed);
-  nP = Array.from({ length: 8 }, () => r() * 6.28);
-  // Rings of cliffs, closer together and taller toward the top
-  BANDS = [];
-  for (let k = 0; k < cfg.bands; k++) {
-    const f = (k + 0.5) / cfg.bands;
-    const c = cfg.length * (0.2 + 0.68 * Math.pow(f, 0.85));
-    const W = lerp(cfg.bandLo, cfg.bandHi, f) * (0.9 + 0.2 * r());
-    BANDS.push({ lo: c - W / 2, hi: c + W / 2, tan: Math.tan(lerp(cfg.cliffLo, cfg.cliffHi, f) / DEG) });
-  }
-  let h = 0;
-  for (let i = 0; i <= profileN + 1; i++) {
-    const u = i + XMIN;   // distance up the slope from the foot
-    let s = 0;
-    if (u > 0 && u < cfg.length) {
-      const t = u / cfg.length;
-      let tan = Math.tan(lerp(cfg.ledgeLo, cfg.ledgeHi, t) / DEG);   // ledges get steeper as you climb
-      for (const b of BANDS) {
-        const m = smooth((u - b.lo) / 8 + 0.5) * smooth((b.hi - u) / 8 + 0.5);
-        if (m > 0) tan = lerp(tan, b.tan, m);
-      }
-      s = tan / VERT * smooth(u / 150) * smooth((cfg.length - u) / 40);
-    }
-    profile[i] = h; h += s;
+const nP = (() => { const r = mulberry(SEED); return Array.from({ length: 10 }, () => r() * 6.28); })();
+function waveU(x) { return 200 * Math.sin(x * 0.0016 + nP[0]) + 70 * Math.sin(x * 0.0041 + nP[1]); }
+function uAt(x, z) { return z + waveU(x); }
+function upDir(x) {   // straight up the slope (across the contours)
+  const d = 200 * 0.0016 * Math.cos(x * 0.0016 + nP[0]) + 70 * 0.0041 * Math.cos(x * 0.0041 + nP[1]);
+  const l = Math.hypot(d, 1);
+  return [d / l, 1 / l];
+}
+
+const ROAD_BANK = 45;   // width of the steep bank on each side of a ramp
+const BANDS = [];
+function ensureBands(u) {
+  while (!BANDS.length || BANDS[BANDS.length - 1].hi < u) {
+    const k = BANDS.length, f = Math.min(1, k / 20);   // full difficulty by the 20th band
+    const r = mulberry(SEED * 7 + k * 7919 + 1);
+    const W = lerp(40, 85, f) * (0.9 + 0.2 * r());
+    const ledge = k === 0 ? 330 : lerp(380, 300, f) * (0.9 + 0.25 * r());
+    const lo = (k ? BANDS[k - 1].hi : 0) + ledge;
+    const b = {
+      k, f, lo, hi: lo + W,
+      tan: Math.tan((lerp(56, 70, f) + (r() - 0.5) * 4) / DEG),          // the cliff
+      ledgeTan: Math.tan((lerp(13, 25, f) + (r() - 0.5) * 4) / DEG),     // the ledge below it
+      roadDeg: lerp(27, 31, f),                                          // a good ramp
+      camberDeg: lerp(3, 7, f),                                          // its tilt toward the drop
+      roadHalf: lerp(70, 56, f),                                         // half its width
+      good: lerp(0.35, 0.12, f),                                         // chance a ramp that isn't the sure one also goes
+    };
+    const tanT = Math.tan(b.roadDeg / DEG), tanC = Math.tan(b.camberDeg / DEG);
+    b.tanA0 = Math.sqrt(tanT * tanT - tanC * tanC);
+    // each ramp gets a cell of its own, wide enough that it can't run into the next
+    b.cw = Math.round(Math.max(1000, 2.4 * W * b.tan / b.tanA0 + 2 * (b.roadHalf + ROAD_BANK) + 200));
+    BANDS.push(b);
   }
 }
+function bandAbove(u) {   // index of the first band whose top is above u
+  ensureBands(u + 1000);
+  let lo = 0, hi = BANDS.length - 1;
+  while (lo < hi) { const m = (lo + hi) >> 1; if (BANDS[m].hi < u) lo = m + 1; else hi = m; }
+  return lo;
+}
+const TAN_FOOT = Math.tan(10 / DEG);
+function profSlope(u) {
+  if (u < 0) return TAN_FOOT / VERT;
+  const j = bandAbove(u), b = BANDS[j];
+  // the ledge's own steepness changes inside the band, where the cliff hides it
+  let tan = u < b.lo ? b.ledgeTan : lerp(b.ledgeTan, BANDS[j + 1].ledgeTan, smooth((u - b.lo) / (b.hi - b.lo)));
+  tan = lerp(TAN_FOOT, tan, smooth(u / 150));
+  for (const bb of [BANDS[j - 1], b]) {
+    if (!bb) continue;
+    const m = smooth((u - bb.lo) / 8 + 0.5) * smooth((bb.hi - u) / 8 + 0.5);
+    if (m > 0) tan = lerp(tan, bb.tan, m);
+  }
+  return tan / VERT;
+}
+const UMIN = -4000;
+let prof = new Float32Array(1 << 15), profN = 0;
 function profileAt(u) {
-  let i = u - XMIN;
-  if (i < 0) i = 0;
-  if (i > profileN) i = profileN;
-  const i0 = Math.floor(i), t = i - i0;
-  return profile[i0] * (1 - t) + profile[i0 + 1] * t;
+  const i = u - UMIN;
+  if (i < 0) return UMIN * TAN_FOOT / VERT + i * TAN_FOOT / VERT;
+  const i0 = Math.floor(i);
+  if (i0 + 2 > profN) {
+    if (i0 + 2 > prof.length) {
+      let L = prof.length; while (L < i0 + 2) L *= 2;
+      const p = new Float32Array(L); p.set(prof.subarray(0, profN)); prof = p;
+    }
+    for (; profN < i0 + 2; profN++) prof[profN] = profN ? prof[profN - 1] + profSlope(profN - 1 + UMIN) : UMIN * TAN_FOOT / VERT;
+  }
+  const t = i - i0;
+  return prof[i0] * (1 - t) + prof[i0 + 1] * t;
 }
-// Smooth mountain shape; the faceted mesh is built from it
-// Some sides of the mountain are stretched into gentler shoulders, others are
-// steeper faces, and the gentle sides twist around the peak as you climb.
-function stretch(th, r) {
-  const w = r / rFoot, fade = smooth(w / 0.22);
-  return fade * cfg.shoulder * Math.sin(2 * th + nP[0] + w * cfg.twist) + fade * 0.2 * cfg.shoulder * Math.sin(3 * th + nP[1] - w * cfg.twist * 1.4);
-}
-function uAt(x, z) {
-  const r = Math.sqrt(x * x + z * z);
-  return rFoot - r / (1 + stretch(Math.atan2(z, x), r));
+// smooth ground, without the small bumps
+function hBase(x, z) {
+  return (profileAt(uAt(x, z)) + 18 * Math.sin(x * 0.0013 + nP[2]) * Math.sin(z * 0.0009 + nP[3])) * VERT;
 }
 function hNatural(x, z) {
-  const r = Math.sqrt(x * x + z * z);
-  let h = profileAt(uAt(x, z));
-  const onSlope = smooth((r - TOP) / 250) * smooth((rFoot + 150 - r) / 400);
-  // uneven ground: patches that are shallower or steeper than the mountain around them
-  h += cfg.bumps * onSlope * (
-    Math.sin(x * 0.011 + z * 0.004 + nP[2]) * Math.sin(z * 0.013 - x * 0.005 + nP[3]) +
-    0.5 * Math.sin(x * 0.023 + nP[4]) * Math.sin(z * 0.019 + nP[5]));
-  // rolling foothills
-  const fh = smooth((r - rFoot + 100) / 500);
-  h += fh * 22 * Math.sin(x * 0.0035 + nP[6]) * Math.sin(z * 0.0042 + nP[7]);
-  return h * VERT;
+  // uneven ground: patches that are shallower or steeper than the slope around them
+  return hBase(x, z) + 2 * VERT * (
+    Math.sin(x * 0.011 + z * 0.004 + nP[4]) * Math.sin(z * 0.013 - x * 0.005 + nP[5]) +
+    0.5 * Math.sin(x * 0.023 + nP[6]) * Math.sin(z * 0.019 + nP[7]));
 }
-function hBase(x, z) { return profileAt(uAt(x, z)) * VERT; }   // smooth, without bumps
 
 // ---------------------------------------------------------------------------
-// Ramps: ledges cut diagonally across each band of cliffs. Every band has
-// several, and from a distance they all look climbable, but most hide a crux:
-// a short stretch that is just too steep, a spot where the ledge pinches out,
-// or a ramp that simply stops below the top. At least one per band goes.
+// Ramps: ledges cut diagonally across each band of cliffs, one in every cell
+// along it. From below they all look climbable, but most hide a crux: a short
+// stretch that is just too steep, a spot where the ledge pinches out, or a
+// ramp that simply stops below the top. In every run of four, one goes.
 // ---------------------------------------------------------------------------
-const ROAD_BANK = 45;   // width of the steep bank on each side of a ramp
-let ROAD = null;
-function posAt(th, u) {   // the point at angle th that is u up the slope
-  const cx = Math.cos(th), cz = Math.sin(th);
-  let lo = 0, hi = mapS - 50;
-  for (let i = 0; i < 40; i++) { const m = (lo + hi) / 2; if (uAt(cx * m, cz * m) > u) lo = m; else hi = m; }
-  return [cx * lo, cz * lo];
-}
-function buildTrails(rng) {
-  const tanT = Math.tan(cfg.roadDeg / DEG), tanC = Math.tan(cfg.camberDeg / DEG);
-  const tanA0 = Math.sqrt(tanT * tanT - tanC * tanC);      // grade along a ramp
+const GROUP = 4;
+const ROAD = { xs: [], zs: [], ys: [], lx: [], lz: [], cam: [], hw: [], tid: [], trails: [], grid: new Map(), gc: 100 };
+const gkey = (i, j) => (i + 100000) * 200000 + (j + 100000);
+function march(b, x, z, spin, stopU, kind, cruxU, forceU) {
+  const { xs, zs, ys, lx, lz, cam, hw, tid, trails } = ROAD;
+  const tanT = Math.tan(b.roadDeg / DEG), tanC = Math.tan(b.camberDeg / DEG), tanA0 = b.tanA0;
   const tanCrux = Math.tan((LIMIT + 9) / DEG);              // a too-steep stretch
-  const xs = [], zs = [], ys = [], lx = [], lz = [], cam = [], hw = [], tid = [];
-  const trails = [];
   const e = 4;
   const slopeAt = (x, z) => Math.hypot(hBase(x + e, z) - hBase(x - e, z), hBase(x, z + e) - hBase(x, z - e)) / (2 * e);
-  function march(x, z, spin, stopU, kind, cruxU, forceU) {
-    const id = trails.length, start = xs.length;
-    let CL = kind === "steep" ? 100 : 200;
-    let tanStart = Math.tan((LIMIT + (kind === "steep" ? 10 : 5)) / DEG);
-    let crux = -1, pdx = 0, pdz = 0;
-    const ds = 8;
-    for (let it = 0; it < 2000; it++) {
-      const gx = (hBase(x + e, z) - hBase(x - e, z)) / (2 * e), gz = (hBase(x, z + e) - hBase(x, z - e)) / (2 * e);
-      const u = uAt(x, z);
-      if (kind && crux < 0 && u >= cruxU && slopeAt(x, z) > tanStart) { if (kind === "end") break; crux = 0; }
-      // no good spot for it yet: wash the ramp out before it reaches the top
-      if (kind && crux < 0 && u >= forceU) { kind = "pinch"; CL = 200; crux = 0; }
-      const inCrux = crux >= 0 && crux < CL;
-      const tanA = inCrux && kind === "steep" ? tanCrux : tanA0;
-      let ux = -x, uz = -z;
-      if (Math.hypot(gx, gz) > 1e-5) { ux = gx; uz = gz; }
-      const ul = Math.hypot(ux, uz) || 1; ux /= ul; uz /= ul;
-      // look ahead up the slope, so the ramp is already angled across when the cliff starts
-      const S = inCrux ? slopeAt(x, z) : Math.max(slopeAt(x, z), slopeAt(x + ux * 40, z + uz * 40), slopeAt(x + ux * 80, z + uz * 80));
-      let dx = ux, dz = uz;
-      if (S > tanA) {                     // too steep to go straight up: traverse
-        const ph = Math.acos(tanA / S) * spin;
-        dx = ux * Math.cos(ph) - uz * Math.sin(ph); dz = ux * Math.sin(ph) + uz * Math.cos(ph);
-      }
-      // turn gently so the ramp has no sharp corners
-      if (it > 0) {
-        const turn = Math.atan2(pdx * dz - pdz * dx, pdx * dx + pdz * dz), mt = 0.025 * ds;
-        if (Math.abs(turn) > mt) { const a = Math.atan2(pdz, pdx) + Math.sign(turn) * mt; dx = Math.cos(a); dz = Math.sin(a); }
-      }
-      pdx = dx; pdz = dz;
-      const gl = Math.hypot(gx, gz);
-      let lxv = -dz, lzv = dx;            // sideways, pointing toward the drop-off
-      if (lxv * gx + lzv * gz > 0) { lxv = -lxv; lzv = -lzv; }
-      const across = gl > 1e-5 ? Math.abs(lxv * gx + lzv * gz) / gl : 0;
-      let w = cfg.roadHalf;
-      if (inCrux && kind === "pinch") w = lerp(cfg.roadHalf, -ROAD_BANK, smooth(Math.min(crux, CL - crux) / 40));   // washed out
-      xs.push(x); zs.push(z); ys.push(hNatural(x, z)); lx.push(lxv); lz.push(lzv);
-      // tilt like the ground does where that's gentle enough (so a ramp blends into a
-      // ledge), but no more than keeps the ramp pushable where it crosses the cliff
-      const along = gl * Math.sqrt(Math.max(0, 1 - across * across));
-      cam.push(inCrux ? 0 : Math.min(gl * across, Math.max(tanC * across, Math.sqrt(Math.max(0, tanT * tanT - along * along)))));
-      hw.push(w); tid.push(id);
-      if (crux >= 0) crux += ds;
-      if (u >= stopU) break;
-      x += dx * ds; z += dz * ds;
+  const id = trails.length, start = xs.length;
+  let CL = kind === "steep" ? 100 : 200;
+  const tanStart = Math.tan((LIMIT + (kind === "steep" ? 10 : 5)) / DEG);
+  let crux = -1, pdx = 0, pdz = 0;
+  const ds = 8;
+  for (let it = 0; it < 2000; it++) {
+    const gx = (hBase(x + e, z) - hBase(x - e, z)) / (2 * e), gz = (hBase(x, z + e) - hBase(x, z - e)) / (2 * e);
+    const u = uAt(x, z);
+    if (kind && crux < 0 && u >= cruxU && slopeAt(x, z) > tanStart) { if (kind === "end") break; crux = 0; }
+    // no good spot for it yet: wash the ramp out before it reaches the top
+    if (kind && crux < 0 && u >= forceU) { kind = "pinch"; CL = 200; crux = 0; }
+    const inCrux = crux >= 0 && crux < CL;
+    const tanA = inCrux && kind === "steep" ? tanCrux : tanA0;
+    let [ux, uz] = upDir(x);
+    const gl0 = Math.hypot(gx, gz);
+    if (gl0 > 1e-5) { ux = gx / gl0; uz = gz / gl0; }
+    // look ahead up the slope, so the ramp is already angled across when the cliff starts
+    const S = inCrux ? slopeAt(x, z) : Math.max(slopeAt(x, z), slopeAt(x + ux * 40, z + uz * 40), slopeAt(x + ux * 80, z + uz * 80));
+    let dx = ux, dz = uz;
+    if (S > tanA) {                     // too steep to go straight up: traverse
+      const ph = Math.acos(tanA / S) * spin;
+      dx = ux * Math.cos(ph) - uz * Math.sin(ph); dz = ux * Math.sin(ph) + uz * Math.cos(ph);
     }
-    trails.push({ start, end: xs.length, kind });
+    // turn gently so the ramp has no sharp corners
+    if (it > 0) {
+      const turn = Math.atan2(pdx * dz - pdz * dx, pdx * dx + pdz * dz);
+        // swinging back uphill at the top, never turn tighter than the ramp is wide (it would fold over itself)
+        const toUp = dx * ux + dz * uz > pdx * ux + pdz * uz;
+        const mt = toUp ? ds / (b.roadHalf + ROAD_BANK + 10) : 0.025 * ds;
+      if (Math.abs(turn) > mt) { const a = Math.atan2(pdz, pdx) + Math.sign(turn) * mt; dx = Math.cos(a); dz = Math.sin(a); }
+    }
+    pdx = dx; pdz = dz;
+    const gl = gl0;
+    let lxv = -dz, lzv = dx;            // sideways, pointing toward the drop-off
+    if (lxv * gx + lzv * gz > 0) { lxv = -lxv; lzv = -lzv; }
+    const across = gl > 1e-5 ? Math.abs(lxv * gx + lzv * gz) / gl : 0;
+    let w = b.roadHalf;
+    if (inCrux && kind === "pinch") w = lerp(b.roadHalf, -ROAD_BANK, smooth(Math.min(crux, CL - crux) / 40));   // washed out
+    xs.push(x); zs.push(z); ys.push(hNatural(x, z)); lx.push(lxv); lz.push(lzv);
+    // tilt like the ground does where that's gentle enough (so a ramp blends into a
+    // ledge), but no more than keeps the ramp pushable where it crosses the cliff
+    const along = gl * Math.sqrt(Math.max(0, 1 - across * across));
+    cam.push(inCrux ? 0 : Math.min(gl * across, Math.max(tanC * across, Math.sqrt(Math.max(0, tanT * tanT - along * along)))));
+    hw.push(w); tid.push(id);
+    if (crux >= 0) crux += ds;
+    if (u >= stopU) break;
+    x += dx * ds; z += dz * ds;
   }
-  const span = 2 * (cfg.roadHalf + ROAD_BANK) + 60;
-  BANDS.forEach((b, k) => {
-    const spin = (k % 2 ? -1 : 1) * cfg.spin;              // zig-zag: alternate bands wind opposite ways
-    const rMid = rFoot - (b.lo + b.hi) / 2;
-    const reach = (b.hi - b.lo) * b.tan / tanA0;           // how far a ramp travels sideways
-    let count = clamp(Math.floor(2 * Math.PI * rMid / 650), 3, 7);
-    while (count > 2 && 2 * Math.PI * rMid / count < reach + span) count--;
-    const sure = Math.floor(rng() * count);                 // the one that's sure to go
-    const th0 = rng() * Math.PI * 2;
-    const plans = [];
-    for (let i = 0; i < count; i++) {
-      const th = th0 + (i + (rng() - 0.5) * 0.2) * Math.PI * 2 / count;
-      let kind = null;
-      if (i !== sure && rng() > cfg.good) { const q = rng(); kind = q < 0.4 ? "steep" : q < 0.8 ? "pinch" : "end"; }
-      plans.push({ th, kind, cruxU: lerp(b.lo, b.hi, 0.3 + rng() * 0.4), sure: i === sure });
+  const T = { start, end: xs.length, kind, band: b.k, rh: b.roadHalf };
+  trails.push(T);
+  return T;
+}
+function indexTrail(T) {
+  const { xs, zs, grid, gc } = ROAD, reach = T.rh + ROAD_BANK + 5;
+  for (let i = T.start; i < T.end - 1; i++) {
+    const i0 = Math.floor((Math.min(xs[i], xs[i + 1]) - reach) / gc), i1 = Math.floor((Math.max(xs[i], xs[i + 1]) + reach) / gc);
+    const j0 = Math.floor((Math.min(zs[i], zs[i + 1]) - reach) / gc), j1 = Math.floor((Math.max(zs[i], zs[i + 1]) + reach) / gc);
+    for (let j = j0; j <= j1; j++) for (let k = i0; k <= i1; k++) {
+      const key = gkey(k, j);
+      let l = grid.get(key); if (!l) grid.set(key, l = []);
+      l.push(i);
     }
-    plans.sort((p, q) => q.sure - p.sure);                 // the sure one first; others must keep clear of it
-    const mine = [], clear = 2 * (cfg.roadHalf + ROAD_BANK) + 20;
-    for (const pl of plans) {
-      const [x, z] = posAt(pl.th, b.lo - cfg.roadHalf - 20);
-      march(x, z, spin, b.hi + cfg.roadHalf + 30, pl.kind, pl.cruxU, b.hi - (b.hi - b.lo) * 0.3);
-      const T = trails[trails.length - 1];
-      let hit = false;
-      for (const O of mine) {
-        for (let i = T.start; i < T.end && !hit; i += 2) for (let j = O.start; j < O.end; j += 2)
-          if ((xs[i] - xs[j]) ** 2 + (zs[i] - zs[j]) ** 2 < clear * clear) { hit = true; break; }
-        if (hit) break;
-      }
-      if (hit) {   // overlaps another ramp: leave it out
-        for (const arr of [xs, zs, ys, lx, lz, cam, hw, tid]) arr.length = T.start;
-        trails.pop();
-      } else mine.push(T);
-    }
-  });
-  // spatial index of segments
-  const gc = 100, gn = Math.ceil(2 * mapS / gc), grid = new Array(gn * gn);
-  const reachI = cfg.roadHalf + ROAD_BANK + 5;
-  for (let i = 0; i < xs.length - 1; i++) {
-    if (tid[i] !== tid[i + 1]) continue;
-    const i0 = Math.max(0, Math.floor((Math.min(xs[i], xs[i + 1]) - reachI + mapS) / gc));
-    const i1 = Math.min(gn - 1, Math.floor((Math.max(xs[i], xs[i + 1]) + reachI + mapS) / gc));
-    const j0 = Math.max(0, Math.floor((Math.min(zs[i], zs[i + 1]) - reachI + mapS) / gc));
-    const j1 = Math.min(gn - 1, Math.floor((Math.max(zs[i], zs[i + 1]) + reachI + mapS) / gc));
-    for (let j = j0; j <= j1; j++) for (let k = i0; k <= i1; k++) (grid[j * gn + k] || (grid[j * gn + k] = [])).push(i);
   }
-  ROAD = { xs, zs, ys, lx, lz, cam, hw, tid, trails, n: xs.length, gc, gn, grid };
+}
+function overlaps(T) {
+  const { xs, zs, tid, trails, grid, gc } = ROAD, clear = 2 * (T.rh + ROAD_BANK) + 20;
+  for (let i = T.start; i < T.end; i += 2) {
+    const list = grid.get(gkey(Math.floor(xs[i] / gc), Math.floor(zs[i] / gc)));
+    if (!list) continue;
+    for (const j of list) if (trails[tid[j]].band === T.band && (xs[i] - xs[j]) ** 2 + (zs[i] - zs[j]) ** 2 < clear * clear) return true;
+  }
+  return false;
+}
+function buildGroup(b, g) {
+  const r = mulberry((SEED * 13 + b.k * 92821 + g * 68917) | 0);
+  const sure = Math.floor(r() * GROUP);       // the one that's sure to go
+  const made = [];
+  for (let i = 0; i < GROUP; i++) {
+    const spin = r() < 0.5 ? 1 : -1;            // +1 winds toward -x, -1 toward +x
+    let kind = null;
+    if (i !== sure && r() > b.good) { const q = r(); kind = q < 0.4 ? "steep" : q < 0.8 ? "pinch" : "end"; }
+    const cruxU = lerp(b.lo, b.hi, 0.3 + r() * 0.4);
+    const cellL = (g * GROUP + i) * b.cw, m = b.roadHalf + ROAD_BANK + 40 + r() * 50;
+    const x = spin > 0 ? cellL + b.cw - m : cellL + m;
+    const z = b.lo - b.roadHalf - 20 - waveU(x);
+    const T = march(b, x, z, spin, b.hi + b.roadHalf + 30, kind, cruxU, b.hi - (b.hi - b.lo) * 0.3);
+    if (overlaps(T)) {   // runs into another ramp: leave it out
+      for (const arr of [ROAD.xs, ROAD.zs, ROAD.ys, ROAD.lx, ROAD.lz, ROAD.cam, ROAD.hw, ROAD.tid]) arr.length = T.start;
+      ROAD.trails.pop();
+      continue;
+    }
+    indexTrail(T);
+    made.push(T);
+  }
   // make sure every dead end really is one: if a crux didn't come out steep
   // enough, wash out the middle of that ramp
-  for (const T of trails) {
+  const { xs, zs, hw } = ROAD;
+  for (const T of made) {
     if (!T.kind || T.kind === "end") continue;
-    let m = 0;
-    for (let i = T.start; i < T.end; i++) m = Math.max(m, steepAt(xs[i], zs[i]));
-    if (m >= LIMIT + 3) continue;
+    let mx = 0;
+    for (let i = T.start; i < T.end; i++) mx = Math.max(mx, steepAt(xs[i], zs[i]));
+    if (mx >= LIMIT + 3) continue;
     const a = T.start + Math.floor((T.end - T.start) * 0.3), c = T.start + Math.floor((T.end - T.start) * 0.85);
-    for (let i = a; i <= c; i++) hw[i] = lerp(cfg.roadHalf, -ROAD_BANK, smooth(Math.min(i - a, c - i) / 5));
+    for (let i = a; i <= c; i++) hw[i] = lerp(T.rh, -ROAD_BANK, smooth(Math.min(i - a, c - i) / 5));
     T.kind = "pinch";
   }
+}
+// Make every ramp that could reach this area
+const doneGroups = new Set(), doneAreas = new Set();
+let building = false;
+function ensureRamps(x0, x1, z0, z1) {
+  if (building) return;   // a ramp's own checks don't go on to make more ramps
+  building = true;
+  const ua = z0 - 300, ub = z1 + 300;      // |waveU| < 270
+  ensureBands(ub + 1000);
+  for (const b of BANDS) {
+    if (b.hi + b.roadHalf + 120 < ua) continue;
+    if (b.lo - b.roadHalf - 120 > ub) break;
+    const G = b.cw * GROUP;
+    for (let g = Math.floor((x0 - 300) / G); g <= Math.floor((x1 + 300) / G); g++) {
+      const key = b.k * 1e6 + g;
+      if (!doneGroups.has(key)) { doneGroups.add(key); buildGroup(b, g); }
+    }
+  }
+  building = false;
+}
+const AREA = 600;
+function ensureAt(x, z) {
+  const ai = Math.floor(x / AREA), aj = Math.floor(z / AREA), key = gkey(ai, aj);
+  if (doneAreas.has(key) || building) return;
+  doneAreas.add(key);
+  ensureRamps(ai * AREA - 150, (ai + 1) * AREA + 150, aj * AREA - 150, (aj + 1) * AREA + 150);
 }
 // The trail that most claims this spot: distance, segment, how much it's on
 // the trail (w), and sideways offset (+ toward the drop-off)
 const _rq = { d: 0, i: 0, t: 0, o: 0, w: 0, hw: 0 };
 function roadQuery(x, z) {
-  if (!ROAD) return null;
-  const { xs, zs, hw, gc, gn, grid } = ROAD;
-  const ci = Math.floor((x + mapS) / gc), cj = Math.floor((z + mapS) / gc);
-  if (ci < 0 || cj < 0 || ci >= gn || cj >= gn) return null;
-  const list = grid[cj * gn + ci];
+  const { xs, zs, hw, gc, grid } = ROAD;
+  const list = grid.get(gkey(Math.floor(x / gc), Math.floor(z / gc)));
   if (!list) return null;
   let bw = -1, bd = 1e18, bi = -1, bt = 0, bh = 0;
   for (let k = 0; k < list.length; k++) {
@@ -395,6 +408,7 @@ function roadQuery(x, z) {
 }
 function roadWeight(q) { return q ? q.w : 0; }
 function hS(x, z) {
+  ensureAt(x, z);
   const h = hNatural(x, z);
   const q = roadQuery(x, z), w = roadWeight(q);
   if (w <= 0) return h;
@@ -403,47 +417,56 @@ function hS(x, z) {
   return lerp(h, y, w);
 }
 
-// The faceted mesh is the ground: physics reads heights straight off its triangles.
-let MG = null;
-function buildMeshGrid() {
-  const N = Math.min(420, Math.ceil(2 * mapS / FACET));
-  const cell = 2 * mapS / N;
-  const n = (N + 1) * (N + 1);
-  const xs = new Float32Array(n), ys = new Float32Array(n), zs = new Float32Array(n);
-  for (let j = 0; j <= N; j++) for (let i = 0; i <= N; i++) {
-    const edge = i === 0 || j === 0 || i === N || j === N;
-    const x = -mapS + i * cell + (edge ? 0 : (hash2(i, j) - 0.5) * cell * 0.55);
-    const z = -mapS + j * cell + (edge ? 0 : (hash2(j + 7, i + 3) - 0.5) * cell * 0.55);
-    const r = Math.hypot(x, z);
-    const jit = r < TOP ? 0.15 : 1 - 0.95 * roadWeight(roadQuery(x, z));   // keep the top and the trail fairly smooth
-    const v = j * (N + 1) + i;
-    xs[v] = x; zs[v] = z; ys[v] = hS(x, z) + (hash2(i * 3.1, j * 1.7) - 0.5) * 10 * jit;
+// The faceted ground: a jittered lattice of points over the whole world, stored
+// a tile at a time. Physics reads heights straight off its triangles.
+const NT = 30, TS = NT * FACET;   // lattice cells per tile, tile size
+const TILES = new Map();
+function tileData(ti, tj) {
+  const key = gkey(ti, tj);
+  let t = TILES.get(key);
+  if (t) return t;
+  ensureRamps(ti * TS - 150, (ti + 1) * TS + 150, tj * TS - 150, (tj + 1) * TS + 150);
+  const n = NT + 1, xs = new Float32Array(n * n), ys = new Float32Array(n * n), zs = new Float32Array(n * n);
+  for (let j = 0; j <= NT; j++) for (let i = 0; i <= NT; i++) {
+    const gi = ti * NT + i, gj = tj * NT + j;
+    const x = gi * FACET + (hash2(gi, gj) - 0.5) * FACET * 0.55;
+    const z = gj * FACET + (hash2(gj + 7, gi + 3) - 0.5) * FACET * 0.55;
+    const jit = 1 - 0.95 * roadWeight(roadQuery(x, z));   // keep the ramps fairly smooth
+    const v = j * n + i;
+    xs[v] = x; zs[v] = z; ys[v] = hS(x, z) + (hash2(gi * 3.1, gj * 1.7) - 0.5) * 10 * jit;
   }
-  MG = { N, cell, xs, ys, zs };
+  t = { ti, tj, xs, ys, zs, view: null };
+  TILES.set(key, t);
+  return t;
 }
-function triAt(a, b, c, x, z) {
-  const { xs, ys, zs } = MG;
-  const x1 = xs[a], z1 = zs[a], x2 = xs[b], z2 = zs[b], x3 = xs[c], z3 = zs[c];
+let _lt = null;
+const _c = new Float64Array(12);
+function corner(o, gi, gj) {
+  const ti = Math.floor(gi / NT), tj = Math.floor(gj / NT);
+  let t = _lt;
+  if (!t || t.ti !== ti || t.tj !== tj) _lt = t = tileData(ti, tj);
+  const k = (gj - tj * NT) * (NT + 1) + (gi - ti * NT);
+  _c[o] = t.xs[k]; _c[o + 1] = t.ys[k]; _c[o + 2] = t.zs[k];
+}
+function tri(a, b, c, x, z) {
+  const x1 = _c[a], z1 = _c[a + 2], x2 = _c[b], z2 = _c[b + 2], x3 = _c[c], z3 = _c[c + 2];
   const det = (z2 - z3) * (x1 - x3) + (x3 - x2) * (z1 - z3);
   if (Math.abs(det) < 1e-9) return null;
   const l1 = ((z2 - z3) * (x - x3) + (x3 - x2) * (z - z3)) / det;
   const l2 = ((z3 - z1) * (x - x3) + (x1 - x3) * (z - z3)) / det;
   const l3 = 1 - l1 - l2;
   if (l1 < -1e-6 || l2 < -1e-6 || l3 < -1e-6) return null;
-  return l1 * ys[a] + l2 * ys[b] + l3 * ys[c];
+  return l1 * _c[a + 1] + l2 * _c[b + 1] + l3 * _c[c + 1];
 }
 const NI = [0, -1, 1, 0, 0, -1, 1, -1, 1], NJ = [0, 0, 0, -1, 1, -1, -1, 1, 1];
 function hM(x, z) {
-  if (!MG) return hS(x, z);
-  const { N, cell } = MG;
-  const i0 = Math.floor((x + mapS) / cell), j0 = Math.floor((z + mapS) / cell);
+  const i0 = Math.floor(x / FACET), j0 = Math.floor(z / FACET);
   for (let k = 0; k < 9; k++) {
     const i = i0 + NI[k], j = j0 + NJ[k];
-    if (i < 0 || j < 0 || i >= N || j >= N) continue;
-    const a = j * (N + 1) + i, b = a + 1, d = a + N + 1, e = d + 1;
+    corner(0, i, j); corner(3, i + 1, j); corner(6, i, j + 1); corner(9, i + 1, j + 1);   // a b d e
     let y;
-    if ((i + j) % 2) { y = triAt(a, d, b, x, z); if (y === null) y = triAt(b, d, e, x, z); }
-    else { y = triAt(a, d, e, x, z); if (y === null) y = triAt(a, e, b, x, z); }
+    if ((i + j) & 1) { y = tri(0, 6, 3, x, z); if (y === null) y = tri(3, 6, 9, x, z); }
+    else { y = tri(0, 6, 9, x, z); if (y === null) y = tri(0, 9, 3, x, z); }
     if (y !== null) return y;
   }
   return hS(x, z);
@@ -467,37 +490,43 @@ function steepAt(x, z) {
   const g = surfGrad(x, z);
   return Math.atan(Math.hypot(g.x, g.z)) * DEG;
 }
-const uOf = uAt;   // progress up the mountain
 
 // ---------------------------------------------------------------------------
 // Game state
 // ---------------------------------------------------------------------------
 const keys = {};
-let state = "title";   // title | play | paused | crushed | won
-let level = 1, cfg = levelCfg(1);
-let P, B, stats, shake = 0, flash = 0, tint = true, death = null;
-let bestLevel = store.get("sisyphus.best", 1);
+let state = "title";   // title | play | paused | crushed
+let P, B, stats, shake = 0, flash = 0, death = null;
+let bestH = store.get("sisyphus.bestHeight", 0);
+const heightOf = (x, z) => Math.max(0, Math.round(hM(x, z) * K));
 
-function startLevel(n) {
-  level = n; cfg = levelCfg(n);
-  buildMountain(cfg);
-  buildTrails(mulberry(cfg.seed + 3));
-  buildMeshGrid();
-  // start at the foot of the mountain, facing the peak
-  const thS = mulberry(cfg.seed + 7)() * Math.PI * 2;
-  const [bx, bz] = posAt(thS, 30), [px, pz] = posAt(thS, -45);
-  let dx = bx - px, dz = bz - pz;
-  const dl = Math.hypot(dx, dz) || 1; dx /= dl; dz /= dl;
-  B = { x: bx, z: bz, vx: 0, vz: 0, teeterT: -1, loose: false, q: new THREE.Quaternion() };
+// Put the boulder at u up the slope, with Sisyphus just below it
+function spawn(x, u) {
+  const [ux, uz] = upDir(x);
+  const bx = x, bz = u - waveU(x);
+  const px = bx - ux * 75, pz = bz - uz * 75;
+  const h = Math.atan2(ux, uz);
+  B = { x: bx, z: bz, vx: 0, vz: 0, teeterT: -1, loose: false, q: B ? B.q : new THREE.Quaternion() };
   P = { x: px, z: pz, jy: 0, vy: 0,
         duckT: 0, duckCD: 0, impactT: -1, under: false, contact: false, pushing: false,
-        moving: 0, phase: 0, crushed: false, yaw: Math.atan2(dx, dz), heading: Math.atan2(dx, dz), fx: dx, fz: dz };
+        moving: 0, phase: 0, crushed: false, yaw: h, heading: h, fx: ux, fz: uz };
   death = null; clearGore();
-  stats = { t: 0, slips: 0 };
   shake = 0; flash = 0;
   state = "play";
   camInit = false;
-  buildWorld();
+  updateTiles(Infinity);
+}
+// Start again from the foot of the mountain
+function newGame() {
+  stats = { t: 0, slips: 0, deaths: 0 };
+  spawn(0, 30);
+}
+// After a death: rise again on the ledge below where it happened
+function respawn() {
+  const u = uAt(B.x, B.z), j = bandAbove(u);
+  if (j === 0) { spawn(B.x, 30); return; }
+  const lo = BANDS[j - 1].hi, hi = BANDS[j].lo;
+  spawn(B.x, (lo + hi) / 2 + 30);
 }
 
 function bCenter() {
@@ -514,6 +543,7 @@ function slip() {
 }
 function crush() {
   state = "crushed"; P.crushed = true; flash = 1; shake = 22;
+  stats.deaths++; store.set("sisyphus.bestHeight", bestH);
   sfx.crush();
   startDeath();
 }
@@ -535,12 +565,6 @@ function bodyDistance(bc) {
   const cy = clamp(bc.y, feet + PW, top - PW);
   const dx = P.x - bc.x, dz = P.z - bc.z, dy = bc.y - cy;
   return { d: Math.sqrt(dx * dx + dz * dz + dy * dy), dx, dy, dz };
-}
-
-function clampToMap(o, m) {
-  const r = Math.sqrt(o.x * o.x + o.z * o.z), lim = mapS - m;
-  if (r > lim) { o.x *= lim / r; o.z *= lim / r; return true; }
-  return false;
 }
 
 // ---------------------------------------------------------------------------
@@ -566,8 +590,6 @@ function update(dt) {
   }
   const airborne = P.jy > 0.5;
 
-  // Control frame: forward points from the player toward the peak
-  const pr = Math.hypot(P.x, P.z);
   // Q / E turn you; everything else is relative to the way you face
   P.heading -= turnIn * TURN * dt;   // E = clockwise seen from above
   P.fx = Math.sin(P.heading); P.fz = Math.cos(P.heading);
@@ -620,7 +642,6 @@ function update(dt) {
       B.vx = B.vz = 0;
     }
     B.x += B.vx * dt; B.z += B.vz * dt;
-    clampToMap(B, R);
     P.x = B.x - dx * (R + PW); P.z = B.z - dz * (R + PW);
     P.yaw = Math.atan2(dx, dz);
     // pushed onto ground that's too steep: it gets away from you
@@ -639,11 +660,10 @@ function update(dt) {
       B.vx += -g.x * G * k * dt; B.vz += -g.z * G * k * dt;
       let sp = Math.hypot(B.vx, B.vz);
       if (sp > 0) {
-        const ns = clamp(sp - ROLL_FRICTION * dt, 0, cfg.maxRoll);
+        const ns = clamp(sp - ROLL_FRICTION * dt, 0, MAX_ROLL);
         B.vx *= ns / sp; B.vz *= ns / sp; sp = ns;
       }
       B.x += B.vx * dt; B.z += B.vz * dt;
-      if (clampToMap(B, R)) { B.vx = B.vz = 0; }
       if (sp > 40 && Math.random() < dt * 20) dust(B.x, B.z, 1);
     }
 
@@ -655,7 +675,6 @@ function update(dt) {
       sp = (fwdIn > 0 ? WALK_FWD : fwdIn < 0 ? WALK_BACK : STRAFE) / (1 + 0.8 * up);
       if (ducking) sp *= 0.3;
       P.x += ix * sp * dt; P.z += iz * sp * dt;
-      clampToMap(P, PW);
       P.yaw = P.heading;            // always face forward: A / D sidestep, S backs up
     }
     P.moving = sp;
@@ -713,11 +732,8 @@ function update(dt) {
     B.q.premultiply(_q);
   }
 
-  if (uOf(B.x, B.z) >= cfg.length - 15) {
-    state = "won"; sfx.win();
-    if (level + 1 > bestLevel) { bestLevel = level + 1; store.set("sisyphus.best", bestLevel); }
-    showOverlay();
-  }
+  const hb = heightOf(B.x, B.z);
+  if (hb > bestH) { bestH = hb; if (Math.random() < dt * 2) store.set("sisyphus.bestHeight", bestH); }
 }
 const _axis = new THREE.Vector3(), _q = new THREE.Quaternion();
 
@@ -731,7 +747,7 @@ renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 document.body.insertBefore(renderer.domElement, document.body.firstChild);
 
 const scene = new THREE.Scene();
-scene.fog = new THREE.Fog(new THREE.Color(0xe0a27a), 60, 520);
+scene.fog = new THREE.Fog(new THREE.Color(0xe0a27a), 45, 6200 * K * 0.97);
 const camera = new THREE.PerspectiveCamera(58, 1, 0.1, 8000);
 
 function resize() {
@@ -756,13 +772,13 @@ const sky = (() => {
   const m = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({ vertexColors: true, side: THREE.BackSide, fog: false }));
   scene.add(m);
   const sun = new THREE.Mesh(new THREE.SphereGeometry(140, 16, 8), new THREE.MeshBasicMaterial({ color: 0xfff0c8, fog: false }));
-  sun.position.set(-2600, 1300, 3600);
+  sun.position.set(1900, 4300, 1150);
   m.add(sun);
   return m;
 })();
 
-scene.add(new THREE.HemisphereLight(0xffd8b0, 0x3a2830, 0.7));
-const sunLight = new THREE.DirectionalLight(0xffd9a0, 1.15);
+scene.add(new THREE.HemisphereLight(0xd6dbe6, 0x3a3430, 0.55));
+const sunLight = new THREE.DirectionalLight(0xfff1e0, 1.0);
 sunLight.castShadow = true;
 sunLight.shadow.mapSize.set(2048, 2048);
 Object.assign(sunLight.shadow.camera, { left: -14, right: 14, top: 14, bottom: -14, near: 1, far: 120 });
@@ -771,148 +787,139 @@ scene.add(sunLight, sunLight.target);
 
 const mat = c => new THREE.MeshStandardMaterial({ color: c, roughness: 0.95, flatShading: true });
 
-let worldGroup = null;
-
-// Too-steep ground is tinted red, but only near the boulder: from a distance
-// you have to judge the routes by eye.
-const TINT_R = 280;
-const tintU = { uB: { value: new THREE.Vector2() }, uR: { value: TINT_R * K }, uTint: { value: 1 } };
-function tintedMaterial() {
-  const m = new THREE.MeshStandardMaterial({ vertexColors: true, flatShading: true, roughness: 1 });
+// The rock texture (from a photo of a real boulder), projected from three sides
+// so steep faces don't smear it.
+const rockTex = (() => {
+  const img = new Image(), t = new THREE.Texture(img);
+  img.onload = () => { t.needsUpdate = true; };
+  img.src = window.ROCK_JPG || "assets/rock.jpg";
+  t.wrapS = t.wrapT = THREE.MirroredRepeatWrapping;
+  t.anisotropy = Math.min(8, renderer.capabilities.getMaxAnisotropy());
+  return t;
+})();
+const SKY_TOP = new THREE.Color(0x2a1a44), SKY_MID = new THREE.Color(0xc8664c), SKY_LOW = new THREE.Color(0xf4c08a);
+const skyU = { uSkyTop: { value: SKY_TOP }, uSkyMid: { value: SKY_MID }, uSkyLow: { value: SKY_LOW } };
+// space "world": the texture is fixed to the ground; "object": it turns with the mesh.
+// Far away the rock fades into the sky behind it.
+function rockMaterial({ space = "world", s1 = 1 / 6, s2 = 1 / 23, color = 0xffffff, flat = true, rough = 0.95 } = {}) {
+  const m = new THREE.MeshStandardMaterial({ color, roughness: rough, flatShading: flat });
+  m.extensions = { derivatives: true };
   m.onBeforeCompile = sh => {
-    Object.assign(sh.uniforms, tintU);
-    sh.vertexShader = "attribute float danger;\nvarying float vDanger;\nvarying vec3 vWP;\n" +
-      sh.vertexShader.replace("#include <begin_vertex>",
-        "#include <begin_vertex>\n  vDanger = danger;\n  vWP = (modelMatrix * vec4(transformed, 1.0)).xyz;");
-    sh.fragmentShader = "uniform vec2 uB;\nuniform float uR;\nuniform float uTint;\nvarying float vDanger;\nvarying vec3 vWP;\n" +
-      sh.fragmentShader.replace("#include <color_fragment>",
-        "#include <color_fragment>\n  float tf = uTint * vDanger * (1.0 - smoothstep(uR * 0.55, uR, distance(vWP.xz, uB)));\n" +
-        "  diffuseColor.rgb = mix(diffuseColor.rgb, vec3(0.72, 0.2, 0.16), tf);");
+    Object.assign(sh.uniforms, skyU, { uRock: { value: rockTex }, uS: { value: new THREE.Vector2(s1, s2) } });
+    sh.vertexShader = "varying vec3 vTP;\nvarying vec3 vWP;\n" + sh.vertexShader.replace("#include <begin_vertex>",
+      `#include <begin_vertex>
+  vec4 wp4 = vec4(transformed, 1.0);
+  #ifdef USE_INSTANCING
+  wp4 = instanceMatrix * wp4;
+  #endif
+  vWP = (modelMatrix * wp4).xyz;
+  vTP = ${space === "object" ? "transformed" : "vWP"};`);
+    sh.fragmentShader = `uniform sampler2D uRock;\nuniform vec2 uS;\nuniform vec3 uSkyTop;\nuniform vec3 uSkyMid;\nuniform vec3 uSkyLow;
+varying vec3 vTP;\nvarying vec3 vWP;
+vec3 tri3(vec3 p, vec3 w, float s) {
+  return texture2D(uRock, p.zy * s).rgb * w.x + texture2D(uRock, p.xz * s).rgb * w.y + texture2D(uRock, p.xy * s).rgb * w.z;
+}
+vec3 skyAt(float t) {
+  return t > 0.12 ? mix(uSkyMid, uSkyTop, min(1.0, (t - 0.12) / 0.6)) : mix(uSkyLow, uSkyMid, clamp((t + 0.05) / 0.17, 0.0, 1.0));
+}
+` + sh.fragmentShader
+      .replace("#include <map_fragment>", `
+  vec3 tn = normalize(cross(dFdx(vTP), dFdy(vTP)));
+  vec3 bw = pow(abs(tn), vec3(4.0)); bw /= (bw.x + bw.y + bw.z);
+  vec3 rk = mix(tri3(vTP, bw, uS.x), tri3(vTP + 17.0, bw, uS.y), 0.4);
+  diffuseColor.rgb *= rk * 1.1;`)
+      .replace("#include <fog_fragment>", `
+  #ifdef USE_FOG
+  float fd = length(vWP - cameraPosition);
+  float ff = smoothstep(fogNear, fogFar, fd);
+  gl_FragColor.rgb = mix(gl_FragColor.rgb, skyAt(normalize(vWP - cameraPosition).y), ff);
+  #endif`);
   };
   return m;
 }
+const groundMat = rockMaterial();
+const pebbleMat = rockMaterial({ s1: 1 / 1.5, s2: 1 / 5, color: 0xd8d2cc });
 
-// Facet colors: grassy foothills, rock, then snow toward the peak
-const C_GRASS = new THREE.Color(0x7d8a4a), C_GRASS2 = new THREE.Color(0x5f6e3c);
-const C_ROCK = new THREE.Color(0x8a6e5c), C_ROCK2 = new THREE.Color(0x6a5650);
-const C_SNOW = new THREE.Color(0xf2ece4), C_DANGER = new THREE.Color(0xb8322a), C_PATH = new THREE.Color(0xb89a6c);
-function facetColor(y, ny, n) {
-  const top = profileAt(cfg.length) * VERT;
-  const hf = clamp(y / top, -0.2, 1.1);
-  const steep = 1 - ny;                                // 0 = flat facet
-  let c;
-  if (hf < 0.1) c = C_GRASS.clone().lerp(C_GRASS2, n);
-  else if (hf < 0.18) c = C_GRASS.clone().lerp(C_ROCK, (hf - 0.1) / 0.08);
-  else c = C_ROCK.clone().lerp(C_ROCK2, n * 0.8);
-  if (hf > 0.75 && steep < 0.25 + n * 0.08) c.lerp(C_SNOW, smooth((hf - 0.75) / 0.12));
-  c.multiplyScalar(1 - steep * 0.7 + n * 0.08);
-  return c;
-}
-
-function applyTint() { tintU.uTint.value = tint ? 1 : 0; }
-
-function buildWorld() {
-  if (worldGroup) {
-    scene.remove(worldGroup);
-    worldGroup.traverse(o => { if (o.geometry) o.geometry.dispose(); });
+// The ground near you is built in tiles, and thrown away once you're far off
+const VIEW = 6200;   // how far you can see (sim units)
+const pebbleGeo = new THREE.DodecahedronGeometry(1, 0);
+function buildTileView(t) {
+  const n = NT + 1, pos = new Float32Array(NT * NT * 6 * 3);
+  let o = 0;
+  const put = v => { pos[o++] = t.xs[v] * K; pos[o++] = t.ys[v] * K; pos[o++] = t.zs[v] * K; };
+  for (let j = 0; j < NT; j++) for (let i = 0; i < NT; i++) {
+    const a = j * n + i, b = a + 1, d = a + n, e = d + 1;
+    if ((t.ti * NT + i + t.tj * NT + j) & 1) { put(a); put(d); put(b); put(b); put(d); put(e); }
+    else { put(a); put(d); put(e); put(a); put(e); put(b); }
   }
-  worldGroup = new THREE.Group();
-  scene.add(worldGroup);
-  const rnd = mulberry(cfg.seed + 5);
-
-  // Faceted mountain mesh
-  const N = MG.N;
-  const verts = new Float32Array((N + 1) * (N + 1) * 3);
-  for (let v = 0; v < (N + 1) * (N + 1); v++) {
-    verts[v * 3] = MG.xs[v] * K; verts[v * 3 + 1] = MG.ys[v] * K; verts[v * 3 + 2] = MG.zs[v] * K;
-  }
-  const idx = [];
-  for (let j = 0; j < N; j++) for (let i = 0; i < N; i++) {
-    const a = j * (N + 1) + i, b = a + 1, d = a + N + 1, e = d + 1;
-    if ((i + j) % 2) idx.push(a, d, b, b, d, e); else idx.push(a, d, e, a, e, b);
-  }
-  let geo = new THREE.BufferGeometry();
-  geo.setAttribute("position", new THREE.BufferAttribute(verts, 3));
-  geo.setIndex(idx);
-  geo = geo.toNonIndexed();
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute("position", new THREE.BufferAttribute(pos, 3));
   geo.computeVertexNormals();
-  const pos = geo.attributes.position, nor = geo.attributes.normal;
-  const nat = new Float32Array(pos.count * 3), dng = new Float32Array(pos.count);
-  for (let f = 0; f < pos.count; f += 3) {
-    const y = (pos.getY(f) + pos.getY(f + 1) + pos.getY(f + 2)) / 3 / K;
-    const ny = Math.abs(nor.getY(f));
-    const c = facetColor(y, ny, hash2(f, 0.5));
-    // Ground the boulder would slip on gets a red tint (toggle with T)
-    const fcx = (pos.getX(f) + pos.getX(f + 1) + pos.getX(f + 2)) / 3 / K;
-    const fcz = (pos.getZ(f) + pos.getZ(f + 1) + pos.getZ(f + 2)) / 3 / K;
-    // the trail is worn bare
-    const rq = roadQuery(fcx, fcz);
-    const rw = rq ? smooth((Math.max(rq.hw, cfg.roadHalf * 0.5) + 6 - rq.d) / 14) : 0;
-    if (rw > 0) c.lerp(C_PATH.clone().multiplyScalar(0.9 + hash2(f, 1.5) * 0.15), rw * 0.8);
-    const deg = steepAt(fcx, fcz);
-    const dv = deg > LIMIT ? 0.6 : deg > LIMIT - 3 ? 0.2 : 0;
-    for (let k = 0; k < 3; k++) {
-      const o = (f + k) * 3;
-      nat[o] = c.r; nat[o + 1] = c.g; nat[o + 2] = c.b;
-      dng[f + k] = dv;
-    }
-  }
-  geo.setAttribute("color", new THREE.BufferAttribute(nat, 3));
-  geo.setAttribute("danger", new THREE.BufferAttribute(dng, 1));
-  applyTint();
-  const mountain = new THREE.Mesh(geo, tintedMaterial());
-  mountain.receiveShadow = true;
-  worldGroup.add(mountain);
-
-  // Plain beyond the mountain
-  const plain = new THREE.Mesh(new THREE.CircleGeometry(4000, 48), mat(0x5f6a3a));
-  plain.rotation.x = -Math.PI / 2; plain.position.y = -30 * K;
-  worldGroup.add(plain);
-
-  // Distant mountains on the horizon
-  const mm = mat(0x7a5262);
-  for (let i = 0; i < 26; i++) {
-    const a = rnd() * Math.PI * 2, d = mapS * K + 320 + rnd() * 700;
-    const h = 80 + rnd() * 240, rad = 70 + rnd() * 120;
-    const m = new THREE.Mesh(new THREE.ConeGeometry(rad, h, 5 + Math.floor(rnd() * 3)), mm);
-    m.position.set(Math.cos(a) * d, -2 + h / 2, Math.sin(a) * d);
-    m.rotation.y = rnd() * 6;
-    worldGroup.add(m);
-  }
-
-  // Scattered rocks across the mountainside (instanced)
-  const rockCount = Math.round(rFoot * rFoot / 9000);
-  const rocks = new THREE.InstancedMesh(new THREE.DodecahedronGeometry(1, 0), mat(0x7a6a62), rockCount);
+  const g = new THREE.Group();
+  const ground = new THREE.Mesh(geo, groundMat);
+  ground.receiveShadow = true;
+  g.add(ground);
+  // loose rocks lying about (not on the ramps)
+  const rnd = mulberry(gkey(t.ti, t.tj) | 0);
+  const cnt = 40, rocks = new THREE.InstancedMesh(pebbleGeo, pebbleMat, cnt);
   const m4 = new THREE.Matrix4(), q = new THREE.Quaternion(), e3 = new THREE.Euler(), s3 = new THREE.Vector3(), p3 = new THREE.Vector3();
-  for (let i = 0; i < rockCount; i++) {
-    const a = rnd() * Math.PI * 2, r = TOP + 60 + Math.sqrt(rnd()) * (rFoot + 500);
-    const x = Math.cos(a) * r, z = Math.sin(a) * r;
-    const s = (3 + rnd() * 9) * K;
+  for (let i = 0; i < cnt; i++) {
+    const x = (t.ti + rnd()) * TS, z = (t.tj + rnd()) * TS, s = (3 + rnd() * 9) * K;
     const rq = roadQuery(x, z);
-    if (rq && (rq.w > 0 || rq.d < rq.hw + 10)) { m4.makeScale(0, 0, 0); rocks.setMatrixAt(i, m4); continue; }
     q.setFromEuler(e3.set(rnd() * 3, rnd() * 3, 0));
+    if (rq && (rq.w > 0 || rq.d < rq.hw + 10)) { m4.makeScale(0, 0, 0); rocks.setMatrixAt(i, m4); continue; }
     m4.compose(p3.set(x * K, hM(x, z) * K + s * 0.3, z * K), q, s3.set(s, s * (0.6 + rnd() * 0.5), s));
     rocks.setMatrixAt(i, m4);
   }
   rocks.castShadow = true; rocks.receiveShadow = true;
-  worldGroup.add(rocks);
+  g.add(rocks);
+  scene.add(g);
+  t.view = g;
+}
+function dropTileView(t) {
+  scene.remove(t.view);
+  t.view.traverse(o => { if (o.geometry && o.geometry !== pebbleGeo) o.geometry.dispose(); if (o.isInstancedMesh) o.dispose && o.dispose(); });
+  t.view = null;
+}
+// Build the tiles in view (nearest first, at most `budget` this frame), drop far ones
+function updateTiles(budget) {
+  const cx = P ? P.x : 0, cz = P ? P.z : 0;
+  const ti0 = Math.floor(cx / TS), tj0 = Math.floor(cz / TS), rr = Math.ceil(VIEW / TS) + 1;
+  const near = (ti, tj) => Math.hypot(clamp(cx, ti * TS, (ti + 1) * TS) - cx, clamp(cz, tj * TS, (tj + 1) * TS) - cz);
+  const want = [];
+  for (let tj = tj0 - rr; tj <= tj0 + rr; tj++) for (let ti = ti0 - rr; ti <= ti0 + rr; ti++) {
+    const d = near(ti, tj);
+    if (d < VIEW) want.push([d, ti, tj]);
+  }
+  want.sort((a, b) => a[0] - b[0]);
+  for (const [d, ti, tj] of want) {
+    const t = tileData(ti, tj);
+    if (!t.view) { if (budget-- <= 0) break; buildTileView(t); }
+  }
+  for (const t of TILES.values()) if (t.view && near(t.ti, t.tj) > VIEW + TS) dropTileView(t);
 }
 
-// Boulder
+// Boulder: a lumpy, faceted lump of the same rock
 const boulder = (() => {
-  const geo = new THREE.IcosahedronGeometry(R * K, 2);
+  const geo = new THREE.IcosahedronGeometry(R * K, 3);
   const p = geo.attributes.position, v = new THREE.Vector3();
   const r = mulberry(7);
+  const lobes = Array.from({ length: 7 }, () => ({ d: new THREE.Vector3(r() - 0.5, r() - 0.5, r() - 0.5).normalize(), k: 0.05 + r() * 0.07, p: 2 + r() * 4 }));
   const seen = new Map();
   for (let i = 0; i < p.count; i++) {
     v.fromBufferAttribute(p, i);
     const key = `${v.x.toFixed(3)},${v.y.toFixed(3)},${v.z.toFixed(3)}`;
-    if (!seen.has(key)) seen.set(key, 0.93 + r() * 0.1);
+    if (!seen.has(key)) {
+      const n = v.clone().normalize();
+      let f = 0.96 + (r() - 0.5) * 0.035;
+      for (const l of lobes) f += l.k * (Math.pow(Math.max(0, n.dot(l.d)), l.p) - 0.25);
+      seen.set(key, f);
+    }
     v.multiplyScalar(seen.get(key));
     p.setXYZ(i, v.x, v.y, v.z);
   }
   geo.computeVertexNormals();
-  const m = new THREE.Mesh(geo, new THREE.MeshStandardMaterial({ color: 0x8a837a, roughness: 1, flatShading: true }));
+  const m = new THREE.Mesh(geo, rockMaterial({ space: "object", s1: 1 / 1.6, s2: 1 / 3.7, flat: false, rough: 0.9 }));
   m.castShadow = true;
   scene.add(m);
   return m;
@@ -1284,17 +1291,16 @@ function syncVisuals(dt) {
     camera.lookAt(camLook);
   }
   if (state === "title") {
-    // Establishing shot: slowly circle the whole mountain
-    const a = -Math.PI / 2 + Math.sin(now * 0.08) * 0.9, d = (rFoot + 900) * K, top = profileAt(cfg.length) * VERT * K;
-    camera.position.set(Math.cos(a) * d, top * 1.1 + 12, Math.sin(a) * d);
-    camera.lookAt(0, top * 0.4, 0);
+    // Establishing shot: from the foot, looking up the endless mountain
+    const a = Math.sin(now * 0.08) * 0.4, cx = Math.sin(a) * 600, lx = -Math.sin(a) * 900;
+    camera.position.set(cx * K, hM(cx, -500) * K + 5, -500 * K);
+    camera.lookAt(lx * K, hM(lx, 1600) * K + 4, 1600 * K);
     camInit = false;
   }
   sky.position.copy(camera.position);
 
-  tintU.uB.value.set(B.x * K, B.z * K);
   sunLight.target.position.set(P.x * K, hM(P.x, P.z) * K, P.z * K);
-  sunLight.position.copy(sunLight.target.position).add(new THREE.Vector3(-30, 50, 40));
+  sunLight.position.copy(sunLight.target.position).add(new THREE.Vector3(22, 50, 13));   // high and from up the slope: steep faces fall into shade
 }
 
 // ---------------------------------------------------------------------------
@@ -1303,9 +1309,10 @@ function syncVisuals(dt) {
 const $ = id => document.getElementById(id);
 function updateHUD() {
   $("hud").style.display = state === "title" ? "none" : "block";
-  $("lvl").textContent = `Level ${level}`;
-  $("stats").textContent = `Time ${stats.t.toFixed(1)}s · Slips ${stats.slips}`;
-  $("alt").textContent = `Altitude ${Math.max(0, Math.round(hM(B.x, B.z) / 10))} / ${Math.round(profileAt(cfg.length) * VERT / 10)} m`;
+  const u = uAt(B.x, B.z);
+  $("lvl").textContent = `Height ${heightOf(B.x, B.z)} m`;
+  $("stats").textContent = `Best ${bestH} m · Slips ${stats.slips} · Deaths ${stats.deaths}`;
+  $("alt").textContent = `Cliff bands climbed: ${bandAbove(u)}`;
 
   // Steepness gauge: under the boulder, and a little ahead in the direction you'd push
   const scale = LIMIT * 1.35;
@@ -1322,12 +1329,9 @@ function updateHUD() {
   $("ahead").style.left = frac(sa) + "%";
   $("slbl").textContent = `SLOPE ${Math.round(s)}° · ahead ${Math.round(sa)}° · limit ${Math.round(LIMIT)}°`;
 
-  // arrow pointing toward the summit, relative to the way you face
-  const toPeak = Math.atan2(-P.x, -P.z);
-  $("compass").style.transform = `rotate(${(P.heading - toPeak) * DEG}deg)`;
-  const prog = clamp(uOf(B.x, B.z) / cfg.length, 0, 1);
-  $("pfill").style.width = prog * 100 + "%";
-  $("ppct").textContent = Math.round(prog * 100) + "%";
+  // arrow pointing up the slope, relative to the way you face
+  const [ux, uz] = upDir(P.x);
+  $("compass").style.transform = `rotate(${(P.heading - Math.atan2(ux, uz)) * DEG}deg)`;
   $("flash").style.opacity = flash * 0.5;
 }
 
@@ -1344,21 +1348,18 @@ function showOverlay() {
       <p><kbd>SHIFT</kbd> duck — only for a split second, so time it</p><br>
       <p class="small">Push it onto ground that's too steep and it slips back down on you.</p>
       <p class="small">Duck the instant it hits — or get out of its way.</p>
-      <p class="small">Bands of cliffs ring the mountain. Worn ramps climb across each one, but most hide a</p>
-      <p class="small">stretch too steep to pass. Find the one that goes. <kbd>T</kbd> shows too-steep ground near the boulder.</p>
-      <p class="go">${bestLevel > 1 ? `SPACE to begin · C to continue at level ${bestLevel}` : "Press SPACE to begin"}</p>`;
+      <p class="small">The mountain never ends. Bands of cliffs cross it, higher and steeper as you climb.</p>
+      <p class="small">Ramps slant up through every band, but most hide a stretch too steep to pass.</p>
+      <p class="small">Read the rock — find the one that goes.</p>
+      ${bestH > 0 ? `<p class="small">Highest so far: ${bestH} m</p>` : ""}
+      <p class="go">Press SPACE to begin</p>`;
   } else if (state === "paused") {
-    p.innerHTML = `<h2>Paused</h2><p class="go">P or ESC to resume · R to restart level</p>`;
+    p.innerHTML = `<h2>Paused</h2><p class="go">P or ESC to resume · R to start again from the bottom</p>`;
   } else if (state === "crushed") {
     p.innerHTML = `<h2 style="color:#e0563f">CRUSHED</h2>
       <p class="sub">The boulder got away from him on ground too steep to hold.</p>
-      <p class="go">SPACE to start the climb again</p>`;
-  } else if (state === "won") {
-    p.innerHTML = `<h2 style="color:#ffdf6b">Level ${level} conquered</h2>
-      <p>Time ${stats.t.toFixed(1)}s · Slips ${stats.slips}</p>
-      <p class="sub">The gods frown. The mountain grows.</p>
-      <p class="small">“One must imagine Sisyphus happy.” — Camus</p>
-      <p class="go">SPACE for level ${level + 1}</p>`;
+      <p class="small">Height ${heightOf(B.x, B.z)} m · Best ${bestH} m</p>
+      <p class="go">SPACE to rise again on the ledge below · R to start from the bottom</p>`;
   }
 }
 
@@ -1371,21 +1372,17 @@ window.addEventListener("keydown", e => {
   keys[e.code] = true;
   if (e.repeat) return;
   const go = e.code === "Space" || e.code === "Enter";
-  if (e.code === "KeyT") { tint = !tint; applyTint(); }
   if (state === "title") {
-    if (go) startLevel(1);
-    else if (e.code === "KeyC" && bestLevel > 1) startLevel(bestLevel);
-  } else if (state === "crushed" && go && death && death.real > 1) {
-    startLevel(level);
-  } else if (state === "won" && go) {
-    startLevel(level + 1);
+    if (go) newGame();
+  } else if (state === "crushed" && death && death.real > 1 && (go || e.code === "KeyR")) {
+    if (go) respawn(); else newGame();
   } else if (state === "play") {
     if (e.code === "Space") tryJump();
     else if (e.code === "ShiftLeft" || e.code === "ShiftRight") tryDuck();
     else if (e.code === "KeyP" || e.code === "Escape") state = "paused";
   } else if (state === "paused") {
     if (e.code === "KeyP" || e.code === "Escape") state = "play";
-    else if (e.code === "KeyR") startLevel(level);
+    else if (e.code === "KeyR") newGame();
   }
   showOverlay();
 });
@@ -1395,12 +1392,13 @@ window.addEventListener("blur", () => {
   if (state === "play") { state = "paused"; showOverlay(); }
 });
 
-// Title screen shows level 1 in the background
-startLevel(1); state = "title"; showOverlay();
+// Title screen shows the foot of the mountain
+newGame(); state = "title"; showOverlay();
 
 function renderFrame(dt) {
   shake = Math.max(0, shake - dt * 30);
   flash = Math.max(0, flash - dt * 1.5);
+  if (state !== "title") updateTiles(2);
   syncVisuals(dt);
   updateHUD();
   renderer.render(scene, camera);
