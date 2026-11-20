@@ -1728,7 +1728,7 @@ function updateHorses(dt) {
   }
   // you hear them when they're near enough
   const loud = clamp(1 - (near - 700) / 2000, 0, 1);
-  loopSound("hooves", 100, (state === "play" || state === "paused" || state === "crushed") && loud > 0.02, 0.55 * loud * loud, 1);
+  loopSound("hooves", 100, (state === "play" || state === "crushed") && loud > 0.02, 0.55 * loud * loud, 1);
 }
 
 // Dust particles
@@ -2215,6 +2215,7 @@ function renderFrame(dt) {
   if (state !== "title") updateTiles(2);
   syncVisuals(dt);
   if (state !== "title" && state !== "paused") updateHorses(dt);
+  else loopSound("hooves", 0, false);   // paused (or on the title screen): the herd falls silent
   updateHUD();
   renderer.render(scene, camera);
 }
