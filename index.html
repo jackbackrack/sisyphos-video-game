@@ -49,7 +49,7 @@
     <div class="track"><div id="sdanger"></div><div id="sfill"></div><div class="tick" id="stick"></div><div id="ahead"></div></div>
     <div class="legend">bar = under the boulder · white line = just ahead · red = too steep</div></div>
   <div id="progBox" class="box"><div class="row"><span>Uphill</span><span id="compass" style="display:inline-block;font-size:20px;line-height:16px;font-family:sans-serif;color:#ffdf6b">&#x2191;</span></div></div>
-  <div id="hint">W forward · S back · A D sidestep · Q E (or ← →) turn · push the boulder the way you face · SPACE jump · SHIFT duck · H hood · P pause</div>
+  <div id="hint">W forward · S back · A D sidestep · Q E (or ← →) turn · push the boulder the way you face · SPACE jump · SHIFT duck · H hood · C wheels · P pause</div>
 </div>
 <div id="flash"></div>
 <div id="overlay"><div id="panel"></div></div>
@@ -148,7 +148,7 @@ function noise(dur, vol = 0.3, freq = 400, delay = 0) {
   src.start(ac.currentTime + delay);
 }
 // Recorded voice: effort grunts and death screams (see CREDITS.md)
-const clips = { grunt: [], scream: [] }, lastClip = {};
+const clips = { grunt: [], scream: [], wheels: [], rumble: [] }, lastClip = {};
 let clipsLoading = false;
 // Your own takes, recorded on record.html, replace the built-in ones (kind by kind)
 function loadUserClips() {
@@ -158,9 +158,17 @@ function loadUserClips() {
   req.onsuccess = () => {
     const t = req.result.transaction("clips", "readonly").objectStore("clips").getAll();
     t.onsuccess = async () => {
-      const mine = { grunt: [], scream: [] };
+      const mine = { grunt: [], scream: [], wheels: [], rumble: [] };
       for (const c of t.result || []) {
-        try { mine[c.kind] && mine[c.kind].push(await AC.decodeAudioData(await c.blob.arrayBuffer())); } catch (e) {}
+        try {
+          if (!mine[c.kind]) continue;
+          const b = await AC.decodeAudioData(await c.blob.arrayBuffer());
+          if (c.kind === "wheels" || c.kind === "rumble") {   // blend the ends so it loops without a click
+            const d = b.getChannelData(0), f = Math.min(Math.floor(b.sampleRate * 0.12), d.length >> 2), n = d.length;
+            for (let i = 0; i < f; i++) { const t = i / f; d[i] = d[i] * t + d[n - f + i] * (1 - t); }
+          }
+          mine[c.kind].push(b);
+        } catch (e) {}
       }
       for (const k in mine) if (mine[k].length) { mine[k].mine = true; clips[k] = mine[k]; }
     };
@@ -175,6 +183,43 @@ function loadClips() {
     for (let k = 0; k < bin.length; k++) bytes[k] = bin.charCodeAt(k);
     AC.decodeAudioData(bytes.buffer, buf => { if (!clips[kind].mine) clips[kind][i] = buf; }, () => {});
   });
+}
+// Looping sounds while the boulder moves: the office-chair wheels, or the rock itself
+// grinding over the ground. Your own recordings if you've made them, otherwise made-up ones.
+function makeLoopBuf(kind) {
+  const ac = AC, sr = ac.sampleRate, len = Math.floor(sr * 2), buf = ac.createBuffer(1, len, sr), d = buf.getChannelData(0);
+  let lp = 0, lp2 = 0;
+  const rock = kind === "rumble";
+  for (let i = 0; i < len; i++) {
+    const w = Math.random() * 2 - 1;
+    lp += (w - lp) * (rock ? 0.03 : 0.08); lp2 += (lp - lp2) * (rock ? 0.12 : 0.3);
+    d[i] += (lp2 * (rock ? 4.5 : 2.2) + w * (rock ? 0.02 : 0.05)) * (0.8 + 0.2 * Math.sin(i / sr * 2 * Math.PI * (rock ? 2.3 : 7)));
+    // the odd click of a caster, or crunch of grit under the rock
+    if (Math.random() < (rock ? 0.0006 : 0.0009)) {
+      const L = rock ? 400 : 60, f = rock ? 0.12 : 0.9, a = rock ? 0.35 : 0.5;
+      for (let k = 0; k < L && i + k < len; k++) d[i + k] += Math.sin(k * f) * Math.exp(-k / (L / 5)) * a * (rock ? Math.random() : 1);
+    }
+  }
+  const f = Math.floor(sr * 0.05);   // fade the ends together so it loops smoothly
+  for (let i = 0; i < f; i++) { const t = i / f; d[i] = d[i] * t + d[len - f + i] * (1 - t); }
+  return buf;
+}
+const loops = {};
+function loopSound(kind, speed, on) {
+  const ac = AC; if (!ac) return;
+  let L = loops[kind];
+  if (!L) { L = loops[kind] = { gain: ac.createGain(), src: null, made: null }; L.gain.gain.value = 0; L.gain.connect(ac.destination); }
+  const mine = clips[kind].length > 0;
+  const want = on && speed > 3;
+  const buf = mine ? clips[kind][0] : (L.made || (L.made = makeLoopBuf(kind)));
+  if (want && (!L.src || L.src.buffer !== buf)) {
+    if (L.src) L.src.stop();
+    L.src = ac.createBufferSource(); L.src.buffer = buf; L.src.loop = true;
+    L.src.connect(L.gain); L.src.start();
+  }
+  const t = ac.currentTime, vol = kind === "rumble" ? 0.7 : 0.45;
+  L.gain.gain.setTargetAtTime(want ? clamp(speed / 110, 0.08, 1) * (mine ? 0.9 : vol) : 0, t, 0.08);
+  if (L.src) L.src.playbackRate.setTargetAtTime(clamp(0.7 + speed / 220, 0.6, 2.2), t, 0.1);
 }
 function playClip(kind, vol = 1, rate = 1) {
   const ac = AC, list = clips[kind].filter(Boolean);
@@ -656,7 +701,17 @@ function boulderReach(nx, ny, nz) {   // how far it sticks out from its center a
 function bCenter() {
   const g = meshGrad(B.x, B.z), l = Math.sqrt(1 + g.x * g.x + g.z * g.z);
   const nx = -g.x / l, ny = 1 / l, nz = -g.z / l;
+  if (wheelsOn) return { x: B.x, z: B.z, y: hM(B.x, B.z) + (CHAIR_LIFT + CHAIR_SEAT) / ny };   // riding on the chair base
   return { x: B.x, z: B.z, y: hM(B.x, B.z) + boulderReach(nx, ny, nz) / ny };
+}
+// Office-chair wheels (C): the boulder rides on a five-star base instead of rolling
+let wheelsOn = store.get("sisyphus.wheels", false);
+const CHAIR_LIFT = 13;   // height of the base's top above the ground (sim units)
+let CHAIR_SEAT = R;      // how far the boulder's center sits above the base (worked out from its shape)
+function toggleWheels() {
+  wheelsOn = !wheelsOn; store.set("sisyphus.wheels", wheelsOn);
+  chair.root.visible = wheelsOn;
+
 }
 
 function slip() {
@@ -900,9 +955,9 @@ function update(dt) {
     }
   }
 
-  // Roll the boulder's mesh
+  // Roll the boulder's mesh (on wheels it rides instead)
   const bsp = Math.hypot(B.vx, B.vz);
-  if (bsp > 0.01) {
+  if (bsp > 0.01 && !wheelsOn) {
     _axis.set(B.vz / bsp, 0, -B.vx / bsp);
     _q.setFromAxisAngle(_axis, bsp * dt / R);
     B.q.premultiply(_q);
@@ -1211,7 +1266,7 @@ function updateTiles(budget) {
   for (const t of TILES.values()) if (t.view && near(t.ti, t.tj) > VIEW + TS) dropTileView(t);
 }
 
-let BOULDER_PTS = null;
+let BOULDER_PTS = null, SEAT_Q = new THREE.Quaternion();
 // Boulder: a lumpy lump of the same rock, with smooth-ish curves and bumps of all sizes
 const boulder = (() => {
   const geo = new THREE.IcosahedronGeometry(R * K, 8);    // ~1.6k facets: visible, like the mountain's, with softened edges
@@ -1265,6 +1320,18 @@ const boulder = (() => {
     v.fromBufferAttribute(p, i); pts.push(v.x / K, v.y / K, v.z / K);
   }
   BOULDER_PTS = new Float32Array(pts);
+  // for the office chair: try lots of ways of setting it down, keep the one that sits lowest
+  {
+    const rr = mulberry(99), q = new THREE.Quaternion(), dn = new THREE.Vector3();
+    let best = Infinity;
+    for (let t = 0; t < 400; t++) {
+      q.setFromEuler(new THREE.Euler(rr() * 6.3, rr() * 6.3, rr() * 6.3));
+      dn.set(0, -1, 0).applyQuaternion(q.clone().invert());
+      let m = 0; for (let i = 0; i < pts.length; i += 3) m = Math.max(m, pts[i] * dn.x + pts[i + 1] * dn.y + pts[i + 2] * dn.z);
+      if (m < best) { best = m; SEAT_Q = q.clone(); }
+    }
+    CHAIR_SEAT = best;
+  }
   // smooth normals: average the faces around each corner
   geo.computeVertexNormals();
   const nsum = new Map(), nr = geo.attributes.normal, nv = new THREE.Vector3();
@@ -1460,6 +1527,56 @@ const hero = (() => {
 function toggleHood() {
   hoodUp = !hoodUp; store.set("sisyphus.hood", hoodUp);
   hero.setHood(hoodUp);
+}
+
+// Office-chair base: chrome hub, five black spokes, twin-wheel casters
+const chair = (() => {
+  const black = cloth(0x1c1c1f, 0.45), chrome = cloth(0xd0d2d6, 0.25, { metalness: 0.9 }), tyre = cloth(0x101012, 0.7);
+  const root = new THREE.Group(), tilt = new THREE.Group(); root.add(tilt);
+  const mk = (geo, m, parent, x, y, z) => { const o = new THREE.Mesh(geo, m); o.position.set(x, y, z); o.castShadow = true; o.receiveShadow = true; parent.add(o); return o; };
+  mk(new THREE.CylinderGeometry(6, 7, 4, 16), chrome, tilt, 0, CHAIR_LIFT - 2, 0);          // hub under the rock
+  mk(new THREE.CylinderGeometry(3.4, 3.4, 5, 12), black, tilt, 0, CHAIR_LIFT - 6, 0);
+  const wheels = [];
+  for (let k = 0; k < 5; k++) {
+    const a = k / 5 * Math.PI * 2, cx = Math.cos(a), cz = Math.sin(a);
+    const spoke = mk(new THREE.BoxGeometry(27, 2.6, 4.2), black, tilt, cx * 14, CHAIR_LIFT - 7, cz * 14);
+    spoke.rotation.y = -a;
+    const caster = new THREE.Group(); caster.position.set(cx * 27, 0, cz * 27); tilt.add(caster);
+    mk(new THREE.CylinderGeometry(0.9, 0.9, 4, 8), chrome, caster, 0, 6.6, 0);                // swivel stem
+    mk(new THREE.BoxGeometry(5.6, 1.6, 3.2), black, caster, -1, 4.6, 0);                       // fork
+    const axle = new THREE.Group(); axle.position.set(-2, 2.6, 0); caster.add(axle);
+    for (const s of [-1, 1]) {
+      const w = mk(new THREE.CylinderGeometry(2.6, 2.6, 1.5, 14), tyre, axle, 0, 0, s * 1.1);
+      w.rotation.x = Math.PI / 2;
+      mk(new THREE.CylinderGeometry(1.1, 1.1, 1.6, 8), chrome, axle, 0, 0, s * 1.1).rotation.x = Math.PI / 2;
+    }
+    wheels.push({ caster, axle });
+  }
+  root.scale.setScalar(K);
+  root.visible = wheelsOn;
+  scene.add(root);
+  return { root, tilt, wheels, yaw: 0, spin: 0 };
+})();
+// The rock sits on the hub with its flattest side down; the base leans with the slope and
+// turns toward the way it's going, and the casters spin
+const _cq = new THREE.Quaternion(), _cq2 = new THREE.Quaternion(), _cn = new THREE.Vector3(), _cy = new THREE.Vector3(0, 1, 0);
+function syncChair(bc, dt) {
+  const sp = Math.hypot(B.vx, B.vz);
+  if (sp > 4) {
+    let d = Math.atan2(-B.vz, B.vx) - chair.yaw;
+    d = Math.atan2(Math.sin(d), Math.cos(d));
+    chair.yaw += d * Math.min(1, dt * 6);
+  }
+  chair.spin += sp * dt / 2.6;
+  const g = meshGrad(B.x, B.z);
+  _cn.set(-g.x, 1, -g.z).normalize();
+  _cq.setFromUnitVectors(_cy, _cn);                                   // lean with the ground
+  _cq2.setFromAxisAngle(_cy, chair.yaw);
+  chair.root.quaternion.copy(_cq).multiply(_cq2);
+  chair.root.position.set(B.x * K, hM(B.x, B.z) * K, B.z * K);
+  for (const w of chair.wheels) w.axle.rotation.z = -chair.spin;
+  boulder.quaternion.copy(_cq).multiply(SEAT_Q);
+  boulder.position.set(B.x * K, hM(B.x, B.z) * K, B.z * K).addScaledVector(_cn, (CHAIR_LIFT + CHAIR_SEAT) * K);
 }
 
 // Dust particles
@@ -1729,6 +1846,13 @@ function syncVisuals(dt) {
   // Boulder
   boulder.position.set(bc.x * K, (bc.y + (death ? 2.5 * smooth(death.t / 0.16) : 0)) * K, bc.z * K);
   boulder.quaternion.copy(B.q);
+  if (wheelsOn) syncChair(bc, dt);
+  {
+    const moving = state === "play" || (state === "crushed" && death && death.t < 0.3);
+    const sp = moving ? Math.hypot(B.vx, B.vz) : 0;
+    loopSound("wheels", sp, moving && wheelsOn);
+    loopSound("rumble", sp, moving && !wheelsOn);
+  }
   if (B.teeterT >= 0) boulder.position.x += Math.sin(now * 38) * 0.04;
 
   // Player
@@ -1871,8 +1995,8 @@ function showOverlay() {
       <p><kbd>Q</kbd> <kbd>E</kbd> or <kbd>←</kbd> <kbd>→</kbd> turn — steer the boulder while pushing</p>
       <p><kbd>SPACE</kbd> jump — leap back over the boulder</p>
       <p><kbd>SHIFT</kbd> duck — only for a split second, so time it</p>
-      <p><kbd>H</kbd> hood up / down</p>
-      <p class="small"><a href="record.html" style="color:#ffdf6b">Record your own grunts and screams</a></p><br>
+      <p><kbd>H</kbd> hood up / down &nbsp; <kbd>C</kbd> put the boulder on office-chair wheels</p>
+      <p class="small"><a href="record.html" style="color:#ffdf6b">Record your own grunts, screams and wheel sounds</a></p><br>
       <p class="small">Push it onto ground that's too steep and it slips back down on you.</p>
       <p class="small">Duck the instant it hits — or get out of its way.</p>
       <p class="small">The mountain never ends. Its face is too steep for the boulder: only the trails go up.</p>
@@ -1901,6 +2025,7 @@ window.addEventListener("keydown", e => {
   if (e.repeat) return;
   const go = e.code === "Space" || e.code === "Enter";
   if (e.code === "KeyH") toggleHood();
+  if (e.code === "KeyC") toggleWheels();
   if (state === "title") {
     if (go) newGame();
   } else if (state === "crushed" && death && death.real > 1 && (go || e.code === "KeyR")) {

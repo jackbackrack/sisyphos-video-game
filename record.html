@@ -29,8 +29,8 @@
 </head>
 <body>
 <main>
-  <h1>Sisyphus's voice</h1>
-  <p>Record your own grunts and screams for the game. Each take is trimmed and levelled automatically.
+  <h1>Sisyphus's sounds</h1>
+  <p>Record your own grunts, screams, boulder rumble and wheel sounds for the game. Each take is trimmed and levelled automatically.
      The game uses your takes instead of the built-in ones, in this browser, as soon as you go back to it.</p>
   <p class="small">To put them in the shared version of the game, download the takes you like (or all of them) and send the files over to be bundled in.
      <a href="index.html">Back to the game</a></p>
@@ -47,6 +47,22 @@
   <section data-kind="scream">
     <h2>Screams</h2>
     <p class="small">The death scream as the boulder rolls over you. One to two seconds each; a few different ones.</p>
+    <div class="bar"><button class="rec">● Record</button><span class="hint small">click to start, click again to stop</span></div>
+    <div class="meter"><div></div></div>
+    <ul></ul>
+  </section>
+
+  <section data-kind="rumble">
+    <h2>Boulder rumble</h2>
+    <p class="small">The rock grinding and rumbling over the ground as it moves. Record 3–6 seconds of a steady rumble (it's played on a loop, faster and louder the faster the boulder goes). Your first take is used.</p>
+    <div class="bar"><button class="rec">● Record</button><span class="hint small">click to start, click again to stop</span></div>
+    <div class="meter"><div></div></div>
+    <ul></ul>
+  </section>
+
+  <section data-kind="wheels">
+    <h2>Office-chair wheels</h2>
+    <p class="small">For when the boulder's on wheels (C in the game): roll an office chair across the floor and record 3–6 seconds of it. Played on a loop; your first take is used.</p>
     <div class="bar"><button class="rec">● Record</button><span class="hint small">click to start, click again to stop</span></div>
     <div class="meter"><div></div></div>
     <ul></ul>
@@ -125,7 +141,7 @@ async function render() {
     const kind = sec.dataset.kind, ul = sec.querySelector("ul");
     ul.innerHTML = "";
     const mine = clips.filter(c => c.kind === kind);
-    if (!mine.length) { ul.innerHTML = `<li class="small">No takes yet — the game uses its built-in ${kind}s.</li>`; continue; }
+    if (!mine.length) { ul.innerHTML = `<li class="small">No takes yet — the game uses its built-in sound.</li>`; continue; }
     mine.forEach((c, i) => {
       const li = document.createElement("li");
       li.innerHTML = `<span class="name">${kind} ${i + 1} <span class="small">(${c.dur.toFixed(2)} s)</span></span>`;
