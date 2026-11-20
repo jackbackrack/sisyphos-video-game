@@ -50,6 +50,7 @@
 <div id="overlay"><div id="panel"></div></div>
 <script src="vendor/three.min.js"></script>
 <script src="vendor/rock-texture.js"></script>
+<script src="vendor/voice-sounds.js"></script>
 <script>
 "use strict";
 
@@ -64,8 +65,15 @@ const PH = 54;             // player height
 const VERT = 2.2;          // the mountain is drawn this much steeper than the gameplay slope
 const FACET = 40;          // approximate size of the mountain's facets
 const G = 220;             // gravity for the rolling boulder
-const ROLL_FRICTION = 30;
-const PUSH_SPEED = 95;
+const ROLL_FRICTION = 60;
+const ROLL_DRAG = 0.002;    // air and bounce losses: the faster it rolls the more it loses
+const PUSH_F = 232;         // the most you can shove (as acceleration of the boulder)...
+const PUSH_VMAX = 104;      // ...falling to nothing as it gets up to the speed you can run behind it
+const PUSH_FRICTION = 20;   // rolling resistance while you push
+const WALK_ACC = 420;       // how quickly you get up to speed on foot (so a run-up takes room)
+const RAM = 0.8;            // how much of a run-up carries into the boulder
+const STOP_SPEED = 60;      // a boulder rolling at you faster than this can't be caught
+const DUCK_MAX = 190;       // ...and faster than this, ducking won't save you either
 const WALK_FWD = 150, WALK_BACK = 170, STRAFE = 140;
 const STEER = 2.2;         // how fast (rad/s) you swing around the boulder to push it a new way
 const TURN = 1.0;          // how fast (rad/s) Q / E turn you
@@ -78,7 +86,7 @@ const DEG = 180 / Math.PI;
 
 const LIMIT = 40;           // the steepest ground (in degrees) the boulder can be pushed on
 const SEED = 4242;
-const MAX_ROLL = 95;
+const MAX_ROLL = 320;
 
 // ---------------------------------------------------------------------------
 // Utilities
@@ -107,6 +115,7 @@ let AC = null;
 function audio() {
   if (!AC) { try { AC = new (window.AudioContext || window.webkitAudioContext)(); } catch (e) {} }
   if (AC && AC.state === "suspended") AC.resume();
+  loadClips();
 }
 function tone(freq, dur, type = "sine", vol = 0.12, slideTo = null, delay = 0) {
   const ac = AC; if (!ac) return;
@@ -131,58 +140,32 @@ function noise(dur, vol = 0.3, freq = 400, delay = 0) {
   src.connect(f).connect(g).connect(ac.destination);
   src.start(ac.currentTime + delay);
 }
-// A rough human voice: a buzzy source shaped by vowel formants
-let _curve = null;
-function voice({ f, dur, vol = 0.2, vowel = [700, 1200, 2600], vib = 0, vibRate = 6, rasp = 0, breath = 0.3, attack = 0.02, delay = 0 }) {
-  const ac = AC; if (!ac) return;
-  const t0 = ac.currentTime + delay;
-  const o = ac.createOscillator(); o.type = "sawtooth";
-  // pitch contour: [[time fraction, Hz], ...]
-  o.frequency.setValueAtTime(f[0][1], t0);
-  for (const [tf, hz] of f.slice(1)) o.frequency.linearRampToValueAtTime(hz, t0 + tf * dur);
-  if (vib) {
-    const lfo = ac.createOscillator(), lg = ac.createGain();
-    lfo.frequency.value = vibRate; lg.gain.value = vib;
-    lfo.connect(lg).connect(o.frequency); lfo.start(t0); lfo.stop(t0 + dur + 0.05);
-  }
-  let src = o;
-  if (rasp) {   // a bit of distortion for a strained, throaty sound
-    if (!_curve) { _curve = new Float32Array(1024); for (let i = 0; i < 1024; i++) { const x = i / 512 - 1; _curve[i] = Math.tanh(x * 4); } }
-    const ws = ac.createWaveShaper(); ws.curve = _curve;
-    const pre = ac.createGain(); pre.gain.value = 1 + rasp * 3;
-    o.connect(pre).connect(ws); src = ws;
-  }
-  const env = ac.createGain();
-  env.gain.setValueAtTime(0.0001, t0);
-  env.gain.exponentialRampToValueAtTime(vol, t0 + attack);
-  env.gain.setValueAtTime(vol, t0 + dur * 0.7);
-  env.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
-  vowel.forEach((fq, i) => {
-    const bp = ac.createBiquadFilter(); bp.type = "bandpass"; bp.frequency.value = fq; bp.Q.value = 6;
-    const g = ac.createGain(); g.gain.value = [1, 0.6, 0.3][i] * 3;
-    src.connect(bp).connect(g).connect(env);
+// Recorded voice: effort grunts and death screams (see CREDITS.md)
+const clips = { grunt: [], scream: [] }, lastClip = {};
+let clipsLoading = false;
+function loadClips() {
+  if (clipsLoading || !AC || !window.VOICE) return;
+  clipsLoading = true;
+  for (const kind of ["grunt", "scream"]) VOICE[kind].forEach((b64, i) => {
+    const bin = atob(b64), bytes = new Uint8Array(bin.length);
+    for (let k = 0; k < bin.length; k++) bytes[k] = bin.charCodeAt(k);
+    AC.decodeAudioData(bytes.buffer, buf => { clips[kind][i] = buf; }, () => {});
   });
-  // breath
-  const len = Math.floor(ac.sampleRate * dur), buf = ac.createBuffer(1, len, ac.sampleRate), d = buf.getChannelData(0);
-  for (let i = 0; i < len; i++) d[i] = Math.random() * 2 - 1;
-  const ns = ac.createBufferSource(); ns.buffer = buf;
-  const nb = ac.createBiquadFilter(); nb.type = "bandpass"; nb.frequency.value = vowel[1]; nb.Q.value = 1.5;
-  const ng = ac.createGain(); ng.gain.value = breath;
-  ns.connect(nb).connect(ng).connect(env);
-  env.connect(ac.destination);
-  o.start(t0); o.stop(t0 + dur + 0.05); ns.start(t0);
+}
+function playClip(kind, vol = 1, rate = 1) {
+  const ac = AC, list = clips[kind].filter(Boolean);
+  if (!ac || !list.length) return;
+  let i = Math.floor(Math.random() * list.length);
+  if (list.length > 1 && list[i] === lastClip[kind]) i = (i + 1) % list.length;   // don't repeat the same one
+  lastClip[kind] = list[i];
+  const src = ac.createBufferSource(), g = ac.createGain();
+  src.buffer = list[i]; src.playbackRate.value = rate; g.gain.value = vol;
+  src.connect(g).connect(ac.destination);
+  src.start();
 }
 const sfx = {
-  grunt(effort) {   // effort 0..1: how hard the push is
-    const p = 95 + Math.random() * 25 + effort * 20;
-    voice({ f: [[0, p * 1.15], [0.3, p], [1, p * 0.8]], dur: 0.22 + Math.random() * 0.12 + effort * 0.12,
-            vol: 0.16 + effort * 0.08, vowel: [520, 1050, 2400], rasp: 0.5 + effort * 0.5, breath: 0.5, attack: 0.03 });
-  },
-  scream() {
-    const p = 380 + Math.random() * 60;
-    voice({ f: [[0, p], [0.12, p * 2], [0.55, p * 1.85], [1, p * 1.1]], dur: 1.5, vol: 0.28,
-            vowel: [850, 1300, 2900], vib: 30, vibRate: 7, rasp: 0.8, breath: 0.25, attack: 0.04 });
-  },
+  grunt(effort) { playClip("grunt", 0.55 + 0.4 * effort, 0.96 + Math.random() * 0.08); },   // effort 0..1
+  scream() { playClip("scream", 1); },
   crush() { noise(0.6, 0.6, 300); tone(90, 0.5, "sawtooth", 0.2, 30);
             for (let i = 0; i < 5; i++) noise(0.05, 0.5, 2500, 0.03 + i * 0.045); },
   splat() { noise(0.4, 0.45, 600, 0.05); tone(160, 0.3, "sine", 0.15, 50, 0.05); },
@@ -557,8 +540,8 @@ function spawn(x, u) {
   const bx = x, bz = u - waveU(x);
   const px = bx - ux * 75, pz = bz - uz * 75;
   const h = Math.atan2(ux, uz);
-  B = { x: bx, z: bz, vx: 0, vz: 0, teeterT: -1, loose: false, q: B ? B.q : new THREE.Quaternion() };
-  P = { x: px, z: pz, jy: 0, vy: 0,
+  B = { x: bx, z: bz, vx: 0, vz: 0, s: 0, teeterT: -1, loose: false, q: B ? B.q : new THREE.Quaternion() };
+  P = { x: px, z: pz, vx: 0, vz: 0, jy: 0, vy: 0,
         duckT: 0, duckCD: 0, impactT: -1, under: false, contact: false, pushing: false,
         moving: 0, phase: 0, crushed: false, gruntT: 0.12, yaw: h, heading: h, fx: ux, fz: uz };
   death = null; clearGore();
@@ -588,7 +571,7 @@ function bCenter() {
 function slip() {
   if (B.teeterT >= 0 || B.loose) return;
   B.teeterT = 0.3 + Math.random() * 0.35;   // it hangs for an unpredictable moment, then rolls back
-  B.vx = B.vz = 0;
+  B.vx = B.vz = 0; B.s = 0;
   stats.slips++;
   sfx.creak();
 }
@@ -662,13 +645,21 @@ function update(dt) {
   // A boulder that has slipped rolls free until it reaches ground gentle enough to stop it
   if (B.loose) { B.looseT -= dt; if (B.looseT <= 0 && !steep) B.loose = false; }
   const touching = dist <= R + PW + 2;
-  const canAct = !ducking && !airborne && B.teeterT < 0 && !B.loose;
+  const incoming = -(B.vx * dx + B.vz * dz);              // how fast it's rolling at you
+  const canAct = !ducking && !airborne && B.teeterT < 0 && !B.loose && incoming < STOP_SPEED;
   // The boulder can only be held if it would roll straight into you
   const rollsIntoMe = gl < 0.03 || (downX * -dx + downZ * -dz) > 0.6;
   const pushing = canAct && touching && il > 0 && (ix * dx + iz * dz) > 0.3;
   const holding = canAct && touching && il === 0 && rollsIntoMe;
-  P.contact = (pushing || holding) && !steep;
-  P.pushing = pushing && !steep;
+  // On ground too steep to push you can still carry it on with the speed you already have
+  const wasContact = P.contact;
+  if (!wasContact && pushing) {
+    // a run-up: the speed you hit it with goes into the boulder
+    B.s = Math.max(B.vx * dx + B.vz * dz, RAM * Math.max(0, P.vx * dx + P.vz * dz));
+  }
+  if (!wasContact && holding) B.s = 0;
+  P.contact = (pushing && (!steep || B.s > 0)) || (holding && !steep);
+  P.pushing = pushing && P.contact;
   // he grunts with the effort: as he starts to push, then every step or two
   if (P.pushing) {
     P.gruntT -= dt;
@@ -679,7 +670,7 @@ function update(dt) {
     }
   } else P.gruntT = Math.min(P.gruntT, 0.12);
   P.moving = 0;
-  if ((pushing || holding) && steep) slip();
+  if ((pushing || holding) && !P.contact) slip();
 
   if (P.contact) {
     if (pushing) {
@@ -692,7 +683,16 @@ function update(dt) {
         dx = nx; dz = nz;
       }
       const along = g.x * dx + g.z * dz;                  // uphill slope in the push direction
-      const speed = PUSH_SPEED / (1 + 1.5 * Math.max(0, along));
+      const kk = 1 / Math.sqrt(1 + gl * gl);
+      const steepNow = steepAt(B.x, B.z) > LIMIT;
+      // your shove against gravity, rolling resistance and drag. On ground too steep to
+      // push you get no purchase at all: only the speed it already has carries it on.
+      let s = B.s;
+      const F = steepNow ? 0 : PUSH_F * (1 - s / PUSH_VMAX);
+      s += (F - G * kk * along - PUSH_FRICTION - ROLL_DRAG * s * Math.abs(s)) * dt;
+      if (!steepNow) s = Math.max(0, s);
+      B.s = s;
+      const speed = Math.max(0, s);
       // cross-slope gravity drags the boulder sideways while you push
       const px = g.x - dx * along, pz = g.z - dz * along;
       B.vx = dx * speed - px * SIDE_DRIFT;
@@ -700,13 +700,14 @@ function update(dt) {
       P.phase += speed * dt * 0.09;
       if (Math.random() < dt * 6) dust(P.x, P.z, 1);
     } else {
-      B.vx = B.vz = 0;
+      B.vx = B.vz = 0; B.s = 0;
     }
     B.x += B.vx * dt; B.z += B.vz * dt;
     P.x = B.x - dx * (R + PW); P.z = B.z - dz * (R + PW);
+    P.vx = B.vx; P.vz = B.vz;
     P.yaw = Math.atan2(dx, dz);
-    // pushed onto ground that's too steep: it gets away from you
-    if (steepAt(B.x, B.z) > LIMIT) slip();
+    // on ground too steep, once its momentum is spent it gets away from you
+    if (steepAt(B.x, B.z) > LIMIT && (B.s <= 0 || g.x * dx + g.z * dz <= 0)) slip();
   } else {
     // The boulder is unsupported
     if (B.teeterT >= 0) {
@@ -721,7 +722,7 @@ function update(dt) {
       B.vx += -g.x * G * k * dt; B.vz += -g.z * G * k * dt;
       let sp = Math.hypot(B.vx, B.vz);
       if (sp > 0) {
-        const ns = clamp(sp - ROLL_FRICTION * dt, 0, MAX_ROLL);
+        const ns = clamp(sp - (ROLL_FRICTION + ROLL_DRAG * sp * sp) * dt, 0, MAX_ROLL);
         B.vx *= ns / sp; B.vz *= ns / sp; sp = ns;
       }
       B.x += B.vx * dt; B.z += B.vz * dt;
@@ -735,9 +736,16 @@ function update(dt) {
       const up = Math.max(0, gp.x * ix + gp.z * iz);
       sp = (fwdIn > 0 ? WALK_FWD : fwdIn < 0 ? WALK_BACK : STRAFE) / (1 + 0.8 * up);
       if (ducking) sp *= 0.3;
-      P.x += ix * sp * dt; P.z += iz * sp * dt;
       P.yaw = P.heading;            // always face forward: A / D sidestep, S backs up
     }
+    // you speed up and slow down over a few steps, so a run-up needs room
+    {
+      const tvx = ix * sp, tvz = iz * sp, ex = tvx - P.vx, ez = tvz - P.vz, el = Math.hypot(ex, ez);
+      const m = WALK_ACC * (sp > 0 ? 1 : 2) * dt;
+      if (el <= m) { P.vx = tvx; P.vz = tvz; } else { P.vx += ex / el * m; P.vz += ez / el * m; }
+    }
+    if (!airborne || il > 0) { P.x += P.vx * dt; P.z += P.vz * dt; }
+    sp = Math.hypot(P.vx, P.vz);
     P.moving = sp;
     P.phase += sp * dt * 0.09;
 
@@ -752,11 +760,13 @@ function update(dt) {
       const approaching = bspeed > 10 && (B.vx * sx + B.vz * sz) > 0;
       if (P.under) {
         // passing beneath it
-      } else if (approaching && ducking) {
+      } else if (approaching && ducking && bspeed < DUCK_MAX) {
         P.under = true; P.impactT = -1;
-      } else if (approaching && (B.loose || steepAt(B.x, B.z) > LIMIT || P.impactT >= 0)) {
-        // a slipping boulder can't be stopped: duck now or be crushed
-        if (P.impactT < 0) { P.impactT = 0; shake = Math.max(shake, 6); }
+      } else if (approaching && bspeed >= DUCK_MAX) {
+        crush(); return;                               // far too much weight and speed to survive
+      } else if (approaching && (bspeed > STOP_SPEED || B.loose || steepAt(B.x, B.z) > LIMIT || P.impactT >= 0)) {
+        // too fast to stop: duck now or be crushed (the faster it comes, the less time you get)
+        if (P.impactT < 0) { P.impactT = 0; P.impactWin = IMPACT_WINDOW * clamp(100 / bspeed, 0.4, 1); shake = Math.max(shake, 6); }
         P.x = bc.x + sx * sep; P.z = bc.z + sz * sep;
       } else if (approaching) {
         // on manageable ground you stop it in its tracks
@@ -765,6 +775,8 @@ function update(dt) {
         P.x = bc.x + sx * sep; P.z = bc.z + sz * sep;
       } else {
         P.x = bc.x + sx * sep; P.z = bc.z + sz * sep;   // blocked
+        const into = -(P.vx * sx + P.vz * sz);
+        if (into > 0 && !(il > 0 && (ix * -sx + iz * -sz) > 0.3)) { P.vx += sx * into; P.vz += sz * into; }
       }
     } else {
       // Stay "under" until the boulder has actually rolled past
@@ -777,10 +789,10 @@ function update(dt) {
 
     // Once a slipping boulder has hit you, you have a split second to duck
     if (P.impactT >= 0) {
-      if (ducking) { P.under = true; P.impactT = -1; }
+      if (ducking && Math.hypot(B.vx, B.vz) < DUCK_MAX) { P.under = true; P.impactT = -1; }
       else {
         P.impactT += dt;
-        if (P.impactT > IMPACT_WINDOW) { crush(); return; }
+        if (P.impactT > (P.impactWin || IMPACT_WINDOW)) { crush(); return; }
       }
     }
   }
@@ -1413,7 +1425,8 @@ function showOverlay() {
       <p class="small">Ramps slant up through every band, but most hide a stretch too steep to pass.</p>
       <p class="small">Read the rock — find the one that goes.</p>
       ${bestH > 0 ? `<p class="small">Highest so far: ${bestH} m</p>` : ""}
-      <p class="go">Press SPACE to begin</p>`;
+      <p class="go">Press SPACE to begin</p>
+      <p class="small" style="font-size:11px;margin-top:14px">Voices: VoiceBosch (CC-BY-SA 4.0), creativeheroes, thanvannispen, JohnsonBrandEditing (CC-BY 3.0) — see CREDITS.md</p>`;
   } else if (state === "paused") {
     p.innerHTML = `<h2>Paused</h2><p class="go">P or ESC to resume · R to start again from the bottom</p>`;
   } else if (state === "crushed") {
