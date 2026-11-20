@@ -56,6 +56,7 @@
 <script src="vendor/three.min.js"></script>
 <script src="vendor/rock-texture.js"></script>
 <script src="vendor/voice-sounds.js"></script>
+<script src="vendor/horses.js"></script>
 <script>
 "use strict";
 
@@ -148,7 +149,7 @@ function noise(dur, vol = 0.3, freq = 400, delay = 0) {
   src.start(ac.currentTime + delay);
 }
 // Recorded voice: effort grunts and death screams, recorded for this game
-const clips = { grunt: [], scream: [], wheels: [], rumble: [] }, lastClip = {};
+const clips = { grunt: [], scream: [], wheels: [], rumble: [], hooves: [] }, lastClip = {};
 let clipsLoading = false;
 // Your own takes, recorded on record.html, replace the built-in ones (kind by kind)
 function loadUserClips() {
@@ -158,12 +159,12 @@ function loadUserClips() {
   req.onsuccess = () => {
     const t = req.result.transaction("clips", "readonly").objectStore("clips").getAll();
     t.onsuccess = async () => {
-      const mine = { grunt: [], scream: [], wheels: [], rumble: [] };
+      const mine = { grunt: [], scream: [], wheels: [], rumble: [], hooves: [] };
       for (const c of t.result || []) {
         try {
           if (!mine[c.kind]) continue;
           const b = await AC.decodeAudioData(await c.blob.arrayBuffer());
-          if (c.kind === "wheels" || c.kind === "rumble") {   // blend the ends so it loops without a click
+          if (c.kind === "wheels" || c.kind === "rumble" || c.kind === "hooves") {   // blend the ends so it loops without a click
             const d = b.getChannelData(0), f = Math.min(Math.floor(b.sampleRate * 0.12), d.length >> 2), n = d.length;
             for (let i = 0; i < f; i++) { const t = i / f; d[i] = d[i] * t + d[n - f + i] * (1 - t); }
           }
@@ -188,6 +189,18 @@ function loadClips() {
 // grinding over the ground. Your own recordings if you've made them, otherwise made-up ones.
 function makeLoopBuf(kind) {
   const ac = AC, sr = ac.sampleRate, len = Math.floor(sr * 2), buf = ac.createBuffer(1, len, sr), d = buf.getChannelData(0);
+  if (kind === "hooves") {   // a gallop: three quick thuds and a pause, over and over
+    const stride = 0.5;
+    for (let t0 = 0; t0 < 2 - 0.01; t0 += stride) for (const off of [0, 0.09, 0.19]) {
+      const i0 = Math.floor((t0 + off + (Math.random() - 0.5) * 0.01) * sr), a = 0.6 + Math.random() * 0.3;
+      let lp = 0;
+      for (let k = 0; k < sr * 0.09 && i0 + k < len; k++) {
+        lp += ((Math.random() * 2 - 1) - lp) * 0.25;
+        d[i0 + k] += (Math.sin(k / sr * 2 * Math.PI * 90) * 0.7 + lp * 0.8) * Math.exp(-k / (sr * 0.018)) * a;
+      }
+    }
+    return buf;
+  }
   let lp = 0, lp2 = 0;
   const rock = kind === "rumble";
   for (let i = 0; i < len; i++) {
@@ -205,7 +218,7 @@ function makeLoopBuf(kind) {
   return buf;
 }
 const loops = {};
-function loopSound(kind, speed, on) {
+function loopSound(kind, speed, on, gain, rate) {
   const ac = AC; if (!ac) return;
   let L = loops[kind];
   if (!L) { L = loops[kind] = { gain: ac.createGain(), src: null, made: null }; L.gain.gain.value = 0; L.gain.connect(ac.destination); }
@@ -218,8 +231,8 @@ function loopSound(kind, speed, on) {
     L.src.connect(L.gain); L.src.start();
   }
   const t = ac.currentTime, vol = kind === "rumble" ? 0.7 : 0.45;
-  L.gain.gain.setTargetAtTime(want ? clamp(speed / 110, 0.08, 1) * (mine ? 0.9 : vol) : 0, t, 0.08);
-  if (L.src) L.src.playbackRate.setTargetAtTime(clamp(0.7 + speed / 220, 0.6, 2.2), t, 0.1);
+  L.gain.gain.setTargetAtTime(want ? (gain !== undefined ? gain * (mine ? 1 : 0.8) : clamp(speed / 110, 0.08, 1) * (mine ? 0.9 : vol)) : 0, t, 0.15);
+  if (L.src) L.src.playbackRate.setTargetAtTime(rate || clamp(0.7 + speed / 220, 0.6, 2.2), t, 0.1);
 }
 function playClip(kind, vol = 1, rate = 1) {
   const ac = AC, list = clips[kind].filter(Boolean);
@@ -669,6 +682,7 @@ function spawnAt(bx, bz, px, pz) {
   state = "play";
   camInit = false;
   updateTiles(Infinity);
+  for (const h of horses) h.alive = false;   // the herd turns up again around you
 }
 // On a trail: the boulder at the top of this stretch, Sisyphus a little behind
 function spawnOnTrail(stretch) {
@@ -1656,6 +1670,68 @@ function syncChair(bc, dt) {
   boulder.position.y = (bc.y + (death ? 2.5 * smooth(death.t / 0.16) : 0)) * K;
 }
 
+// A herd of paper horses (cut out of photos of two toy horses) galloping in the distance
+const HORSE_N = 9, HORSE_LEN = 120;   // how many, and how long each is (sim units, ~4 m)
+const horses = (() => {
+  const texs = (window.HORSE_PNG || ["assets/horse_a.png", "assets/horse_b.png"]).map(src => {
+    const img = new Image(), t = new THREE.Texture(img);
+    img.onload = () => { t.needsUpdate = true; t.aspect = img.height / img.width; };
+    img.src = src; t.encoding = THREE.sRGBEncoding; t.aspect = 0.67;
+    return t;
+  });
+  const geo = new THREE.PlaneGeometry(1, 1).translate(0, 0.5, 0);
+  const list = [];
+  for (let i = 0; i < HORSE_N; i++) {
+    const tex = texs[i % texs.length];
+    const m = new THREE.Mesh(geo, new THREE.MeshLambertMaterial({ map: tex, transparent: true, alphaTest: 0.5, side: THREE.DoubleSide }));
+    m.visible = false; scene.add(m);
+    list.push({ m, tex, x: 0, z: 0, vx: 0, vz: 0, ph: Math.random() * 6, sz: 0.8 + Math.random() * 0.4, alive: false });
+  }
+  return list;
+})();
+// Somewhere off in the distance, running across the mountain
+const _hp = new THREE.Vector3();
+function placeHorse(h) {
+  // somewhere you can see from here, if possible
+  camera.updateMatrixWorld();
+  for (let k = 0; k < 30; k++) {
+    const a = P.heading + (Math.random() - 0.5) * 2.4, d = 800 + Math.random() * 2400;
+    h.x = P.x + Math.sin(a) * d; h.z = P.z + Math.cos(a) * d;
+    _hp.set(h.x * K, (hM(h.x, h.z) + 40) * K, h.z * K).project(camera);
+    if (Math.abs(_hp.x) < 0.95 && Math.abs(_hp.y) < 0.85 && _hp.z < 1) break;
+  }
+  h.off = 0;
+  // gallop sideways across the slope, mostly toward where you are
+  const dir = Math.sign((P.x - h.x) || 1) * (Math.random() < 0.8 ? 1 : -1);
+  const sp = 380 + Math.random() * 180;   // ~13-18 m/s
+  h.vx = dir * sp; h.vz = (Math.random() - 0.5) * sp * 0.4;
+  h.alive = true; h.m.visible = true;
+}
+function updateHorses(dt) {
+  if (!P) return;
+  let near = Infinity;
+  const cr = new THREE.Vector3().setFromMatrixColumn(camera.matrixWorld, 0);   // the camera's right
+  for (const h of horses) {
+    if (!h.alive) placeHorse(h);
+    h.x += h.vx * dt; h.z += h.vz * dt; h.ph += dt * 11;
+    const d = Math.hypot(h.x - P.x, h.z - P.z);
+    // out of sight for a while (or galloped too far, or too close): it turns up somewhere else
+    _hp.set(h.x * K, (hM(h.x, h.z) + 40) * K, h.z * K).project(camera);
+    h.off = Math.abs(_hp.x) < 1.1 && Math.abs(_hp.y) < 1.1 && _hp.z < 1 ? 0 : h.off + dt;
+    if (d > 4000 || d < 550 || h.off > 2.5) { placeHorse(h); continue; }
+    near = Math.min(near, d);
+    const s = HORSE_LEN * h.sz, bob = Math.abs(Math.sin(h.ph)) * 0.18 * s * h.tex.aspect;
+    h.m.scale.set(s * K, s * h.tex.aspect * K, 1);
+    h.m.position.set(h.x * K, (hM(h.x, h.z) - 6 + bob) * K, h.z * K);
+    // stand up facing the camera like a cardboard cutout, nose the way it's running
+    h.m.rotation.set(0, Math.atan2(camera.position.x - h.m.position.x, camera.position.z - h.m.position.z), Math.sin(h.ph) * 0.12);
+    if (h.vx * cr.x + h.vz * cr.z < 0) h.m.scale.x *= -1;
+  }
+  // you hear them when they're near enough
+  const loud = clamp(1 - (near - 700) / 2000, 0, 1);
+  loopSound("hooves", 100, (state === "play" || state === "paused" || state === "crushed") && loud > 0.02, 0.55 * loud * loud, 1);
+}
+
 // Dust particles
 const dustPool = [];
 {
@@ -2082,7 +2158,7 @@ function showOverlay() {
       <p><kbd>SPACE</kbd> jump — leap back over the boulder</p>
       <p><kbd>SHIFT</kbd> duck — only for a split second, so time it</p>
       <p><kbd>H</kbd> hood up / down &nbsp; <kbd>C</kbd> put the boulder on office-chair wheels, a tricycle, or nothing</p>
-      <p class="small"><a href="record.html" style="color:#ffdf6b">Record your own grunts, screams and wheel sounds</a></p><br>
+      <p class="small"><a href="record.html" style="color:#ffdf6b">Record your own grunts, screams, wheel and horse sounds</a></p><br>
       <p class="small">Push it onto ground that's too steep and it slips back down on you.</p>
       <p class="small">Duck the instant it hits — or get out of its way.</p>
       <p class="small">The mountain never ends. Its face is too steep for the boulder: only the trails go up.</p>
@@ -2139,6 +2215,7 @@ function renderFrame(dt) {
   flash = Math.max(0, flash - dt * 1.5);
   if (state !== "title") updateTiles(2);
   syncVisuals(dt);
+  if (state !== "title" && state !== "paused") updateHorses(dt);
   updateHUD();
   renderer.render(scene, camera);
 }
