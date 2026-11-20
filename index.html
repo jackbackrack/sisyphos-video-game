@@ -690,20 +690,39 @@ function respawn() {
 // The boulder isn't round: it rests on whichever part of it is lowest against the ground
 // (sampled over its actual outline as it's turned right now)
 const _sq = new THREE.Quaternion(), _sv = new THREE.Vector3(), _sn = new THREE.Vector3();
-function boulderReach(nx, ny, nz) {   // how far it sticks out from its center along -n (sim units)
-  if (!BOULDER_PTS) return R;
-  _sn.set(-nx, -ny, -nz).applyQuaternion(_sq.copy(B.q).invert());   // into the boulder's own frame
-  let best = 0;
-  const P3 = BOULDER_PTS;
-  for (let i = 0; i < P3.length; i += 3) { const d = P3[i] * _sn.x + P3[i + 1] * _sn.y + P3[i + 2] * _sn.z; if (d > best) best = d; }
-  return best;
+// Where the boulder's center is: let it down until it rests on the actual ground under it
+// (its lowest points touching the facets), so it can never hang in the air
+const _bcc = { x: NaN, z: NaN, qx: 0, qy: 0, qz: 0, qw: 0, mode: "", yaw: 0, y: 0 };
+function restY() {
+  const q = B.q;
+  if (_bcc.x === B.x && _bcc.z === B.z && _bcc.mode === rideMode &&
+      (wheelsOn ? _bcc.yaw === rideYaw() : (_bcc.qx === q.x && _bcc.qy === q.y && _bcc.qz === q.z && _bcc.qw === q.w))) return _bcc.y;
+  let y = -Infinity;
+  if (wheelsOn) {
+    // on wheels: the highest ground under any of the wheels holds it up
+    const a = rideYaw(), c = Math.cos(a), sn = Math.sin(a);
+    for (const [lx, lz] of rideMode === "trike" ? TRIKE_FEET : CHAIR_FEET) {
+      const wx = lx * c + lz * sn, wz = -lx * sn + lz * c;   // local +x faces the way it's going
+      y = Math.max(y, hM(B.x + wx, B.z + wz));
+    }
+    y += rideLift() + CHAIR_SEAT;
+  } else if (BOULDER_PTS) {
+    const P3 = BOULDER_PTS, qx = q.x, qy = q.y, qz = q.z, qw = q.w;
+    for (let i = 0; i < P3.length; i += 3) {
+      const vx = P3[i], vy = P3[i + 1], vz = P3[i + 2];
+      // rotate the point by the boulder's turn
+      const tx = 2 * (qy * vz - qz * vy), ty = 2 * (qz * vx - qx * vz), tz = 2 * (qx * vy - qy * vx);
+      const wy = vy + qw * ty + (qz * tx - qx * tz);
+      if (wy > -0.05 * R) continue;                          // only the lower half can rest on the ground
+      const wx = vx + qw * tx + (qy * tz - qz * ty), wz = vz + qw * tz + (qx * ty - qy * tx);
+      y = Math.max(y, hM(B.x + wx, B.z + wz) - wy);
+    }
+  }
+  if (!isFinite(y)) y = hM(B.x, B.z) + R;
+  Object.assign(_bcc, { x: B.x, z: B.z, qx: q.x, qy: q.y, qz: q.z, qw: q.w, mode: rideMode, yaw: wheelsOn ? rideYaw() : 0, y });
+  return y;
 }
-function bCenter() {
-  const g = meshGrad(B.x, B.z), l = Math.sqrt(1 + g.x * g.x + g.z * g.z);
-  const nx = -g.x / l, ny = 1 / l, nz = -g.z / l;
-  if (wheelsOn) return { x: B.x, z: B.z, y: hM(B.x, B.z) + (rideLift() + CHAIR_SEAT) / ny };   // riding on wheels
-  return { x: B.x, z: B.z, y: hM(B.x, B.z) + boulderReach(nx, ny, nz) / ny };
-}
+function bCenter() { return { x: B.x, z: B.z, y: restY() }; }
 // Wheels (C): the boulder rides on an office-chair base or a tricycle instead of rolling
 const RIDES = ["none", "chair", "trike"];
 let rideMode = store.get("sisyphus.ride", store.get("sisyphus.wheels", false) ? "chair" : "none");
@@ -711,6 +730,10 @@ if (!RIDES.includes(rideMode)) rideMode = "none";
 let wheelsOn = rideMode !== "none";
 const CHAIR_LIFT = 13, TRIKE_LIFT = 25;   // height of what the boulder sits on (sim units)
 const rideLift = () => rideMode === "trike" ? TRIKE_LIFT : CHAIR_LIFT;
+const rideYaw = () => rideMode === "trike" ? trike.yaw : chair.yaw;
+// where the wheels touch the ground, in the ride's own frame (front = +x)
+const CHAIR_FEET = Array.from({ length: 5 }, (_, k) => [Math.cos(k / 5 * Math.PI * 2) * 25, Math.sin(k / 5 * Math.PI * 2) * 25]);
+const TRIKE_FEET = [[24, 0], [-16, -13], [-16, 13]];
 let CHAIR_SEAT = R;      // how far the boulder's center sits above its seat (worked out from its shape)
 function toggleWheels() {
   rideMode = RIDES[(RIDES.indexOf(rideMode) + 1) % RIDES.length];
@@ -1620,7 +1643,7 @@ function syncChair(bc, dt) {
   _cq.setFromUnitVectors(_cy, _cn);                                   // lean with the ground
   _cq2.setFromAxisAngle(_cy, R_.yaw);
   R_.root.quaternion.copy(_cq).multiply(_cq2);
-  R_.root.position.set(B.x * K, hM(B.x, B.z) * K, B.z * K);
+  R_.root.position.set(B.x * K, (bc.y - rideLift() - CHAIR_SEAT) * K, B.z * K);
   if (R_ === chair) for (const w of chair.wheels) w.axle.rotation.z = -chair.spin / 2.6;
   else {
     trike.steer += (clamp(d * 1.5, -0.6, 0.6) - trike.steer) * Math.min(1, dt * 8);   // the front wheel turns into the bend
@@ -1630,6 +1653,7 @@ function syncChair(bc, dt) {
   }
   boulder.quaternion.copy(_cq).multiply(SEAT_Q);
   boulder.position.set(B.x * K, hM(B.x, B.z) * K, B.z * K).addScaledVector(_cn, (rideLift() + CHAIR_SEAT) * K);
+  boulder.position.y = (bc.y + (death ? 2.5 * smooth(death.t / 0.16) : 0)) * K;
 }
 
 // Dust particles
