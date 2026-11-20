@@ -911,8 +911,8 @@ const sunLight = new THREE.DirectionalLight(0xfff1e0, 1.25);
 sunLight.castShadow = true;
 sunLight.shadow.mapSize.set(4096, 4096);
 Object.assign(sunLight.shadow.camera, { left: -SHADOW_R, right: SHADOW_R, top: SHADOW_R, bottom: -SHADOW_R, near: 1, far: 400 });
-sunLight.shadow.bias = -0.0004;
-sunLight.shadow.normalBias = 0.04;
+sunLight.shadow.bias = -0.0002;
+sunLight.shadow.normalBias = 0.015;
 scene.add(sunLight, sunLight.target);
 
 const mat = c => new THREE.MeshStandardMaterial({ color: c, roughness: 0.95, flatShading: true });
@@ -933,6 +933,7 @@ const rockNrm = loadTex(window.ROCK_NRM || "assets/rock_normal.jpg", false);
 const sharedU = {
   uSkyTop: { value: SKY_TOP }, uSkyMid: { value: SKY_MID }, uSkyLow: { value: SKY_LOW },
   uPlayer: { value: new THREE.Vector2() },   // where you are (m): fine detail fades out away from you
+  uBoulder: { value: new THREE.Vector4(0, -1e4, 0, 1) },   // boulder center and radius (m): it shuts out the light beneath it
 };
 // space "world": the texture is fixed to the ground; "object": it turns with the mesh.
 // smooth: how much the facets' lighting is blended into their neighbors' (0 = hard facets).
@@ -976,7 +977,7 @@ attribute float disp;
   vTP = ${space === "object" ? "transformed" : "vWP"};
   vTN = ${space === "object" ? "objectNormal" : "normalize(mat3(modelMatrix) * tn4)"};`);
     sh.fragmentShader = `uniform sampler2D uRock;\nuniform sampler2D uNrm;\nuniform vec2 uS;\nuniform float uSmooth;\nuniform float uBump;\nuniform mat3 uRot;
-uniform vec3 uSkyTop;\nuniform vec3 uSkyMid;\nuniform vec3 uSkyLow;
+uniform vec3 uSkyTop;\nuniform vec3 uSkyMid;\nuniform vec3 uSkyLow;\nuniform vec4 uBoulder;
 varying vec3 vTP;\nvarying vec3 vTN;\nvarying vec3 vWP;\nvarying float vAO;
 vec3 tri3(vec3 p, vec3 w, float s) {
   return texture2D(uRock, p.zy * s).rgb * w.x + texture2D(uRock, p.xz * s).rgb * w.y + texture2D(uRock, p.xy * s).rgb * w.z;
@@ -1010,7 +1011,17 @@ vec3 skyAt(float t) {
       .replace("#include <aomap_fragment>", `
   // creases and the foot of each cliff get less light from the sky
   reflectedLight.indirectDiffuse *= vAO;
-  reflectedLight.directDiffuse *= mix(1.0, vAO, 0.35);`)
+  reflectedLight.directDiffuse *= mix(1.0, vAO, 0.35);
+  #ifdef TERRAIN
+  // right under the boulder hardly any light gets in, from the sun or the sky
+  {
+    vec3 bd = vWP - uBoulder.xyz;
+    float hd = length(bd.xz) / uBoulder.w, gap = max(0.0, (bd.y + uBoulder.w) / uBoulder.w);
+    float occ = (1.0 - smoothstep(0.25, 1.35, hd)) * (1.0 - smoothstep(0.2, 1.2, gap));
+    reflectedLight.indirectDiffuse *= 1.0 - 0.85 * occ;
+    reflectedLight.directDiffuse *= 1.0 - 0.9 * (1.0 - smoothstep(0.15, 0.85, hd)) * (1.0 - smoothstep(0.2, 1.0, gap));
+  }
+  #endif`)
       .replace("#include <fog_fragment>", `
   #ifdef USE_FOG
   float fd = length(vWP - cameraPosition);
@@ -1590,6 +1601,7 @@ function syncVisuals(dt) {
     sunLight.position.copy(sunLight.target.position).addScaledVector(SUN_DIR, 150);
   }
   sharedU.uPlayer.value.set(P.x * K, P.z * K);
+  sharedU.uBoulder.value.set(boulder.position.x, boulder.position.y, boulder.position.z, R * K);
 }
 
 // ---------------------------------------------------------------------------
