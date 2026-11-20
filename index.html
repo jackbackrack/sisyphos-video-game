@@ -1701,16 +1701,16 @@ function placeHorse(h) {
     if (Math.abs(_hp.x) < 0.95 && Math.abs(_hp.y) < 0.85 && _hp.z < 1) break;
   }
   h.off = 0;
-  // gallop sideways across the slope, mostly toward where you are
-  const dir = Math.sign((P.x - h.x) || 1) * (Math.random() < 0.8 ? 1 : -1);
+  // gallop mostly across your view, so you see them side-on
+  const vx0 = P.x - camera.position.x / K, vz0 = P.z - camera.position.z / K;
+  const ang = Math.atan2(vz0, vx0) + (Math.random() < 0.5 ? 1 : -1) * Math.PI / 2 + (Math.random() - 0.5) * 0.7;
   const sp = 380 + Math.random() * 180;   // ~13-18 m/s
-  h.vx = dir * sp; h.vz = (Math.random() - 0.5) * sp * 0.4;
+  h.vx = Math.cos(ang) * sp; h.vz = Math.sin(ang) * sp;
   h.alive = true; h.m.visible = true;
 }
 function updateHorses(dt) {
   if (!P) return;
   let near = Infinity;
-  const cr = new THREE.Vector3().setFromMatrixColumn(camera.matrixWorld, 0);   // the camera's right
   for (const h of horses) {
     if (!h.alive) placeHorse(h);
     h.x += h.vx * dt; h.z += h.vz * dt; h.ph += dt * 11;
@@ -1723,9 +1723,8 @@ function updateHorses(dt) {
     const s = HORSE_LEN * h.sz, bob = Math.abs(Math.sin(h.ph)) * 0.18 * s * h.tex.aspect;
     h.m.scale.set(s * K, s * h.tex.aspect * K, 1);
     h.m.position.set(h.x * K, (hM(h.x, h.z) - 6 + bob) * K, h.z * K);
-    // stand up facing the camera like a cardboard cutout, nose the way it's running
-    h.m.rotation.set(0, Math.atan2(camera.position.x - h.m.position.x, camera.position.z - h.m.position.z), Math.sin(h.ph) * 0.12);
-    if (h.vx * cr.x + h.vz * cr.z < 0) h.m.scale.x *= -1;
+    // a flat cutout lined up with the way it's running, so it always goes nose first
+    h.m.rotation.set(0, Math.atan2(-h.vz, h.vx), Math.sin(h.ph) * 0.12);
   }
   // you hear them when they're near enough
   const loud = clamp(1 - (near - 700) / 2000, 0, 1);
