@@ -49,7 +49,7 @@
     <div class="track"><div id="sdanger"></div><div id="sfill"></div><div class="tick" id="stick"></div><div id="ahead"></div></div>
     <div class="legend">bar = under the boulder · white line = just ahead · red = too steep</div></div>
   <div id="progBox" class="box"><div class="row"><span>Uphill</span><span id="compass" style="display:inline-block;font-size:20px;line-height:16px;font-family:sans-serif;color:#ffdf6b">&#x2191;</span></div></div>
-  <div id="hint">W forward · S back · A D sidestep · Q E (or ← →) turn · push the boulder the way you face · SPACE jump · SHIFT duck · H hood · C wheels · P pause</div>
+  <div id="hint">W forward · S back · A D sidestep · Q E (or ← →) turn · push the boulder the way you face · SPACE jump · SHIFT duck · H hood · C wheels (chair / tricycle / off) · P pause</div>
 </div>
 <div id="flash"></div>
 <div id="overlay"><div id="panel"></div></div>
@@ -701,17 +701,21 @@ function boulderReach(nx, ny, nz) {   // how far it sticks out from its center a
 function bCenter() {
   const g = meshGrad(B.x, B.z), l = Math.sqrt(1 + g.x * g.x + g.z * g.z);
   const nx = -g.x / l, ny = 1 / l, nz = -g.z / l;
-  if (wheelsOn) return { x: B.x, z: B.z, y: hM(B.x, B.z) + (CHAIR_LIFT + CHAIR_SEAT) / ny };   // riding on the chair base
+  if (wheelsOn) return { x: B.x, z: B.z, y: hM(B.x, B.z) + (rideLift() + CHAIR_SEAT) / ny };   // riding on wheels
   return { x: B.x, z: B.z, y: hM(B.x, B.z) + boulderReach(nx, ny, nz) / ny };
 }
-// Office-chair wheels (C): the boulder rides on a five-star base instead of rolling
-let wheelsOn = store.get("sisyphus.wheels", false);
-const CHAIR_LIFT = 13;   // height of the base's top above the ground (sim units)
-let CHAIR_SEAT = R;      // how far the boulder's center sits above the base (worked out from its shape)
+// Wheels (C): the boulder rides on an office-chair base or a tricycle instead of rolling
+const RIDES = ["none", "chair", "trike"];
+let rideMode = store.get("sisyphus.ride", store.get("sisyphus.wheels", false) ? "chair" : "none");
+if (!RIDES.includes(rideMode)) rideMode = "none";
+let wheelsOn = rideMode !== "none";
+const CHAIR_LIFT = 13, TRIKE_LIFT = 25;   // height of what the boulder sits on (sim units)
+const rideLift = () => rideMode === "trike" ? TRIKE_LIFT : CHAIR_LIFT;
+let CHAIR_SEAT = R;      // how far the boulder's center sits above its seat (worked out from its shape)
 function toggleWheels() {
-  wheelsOn = !wheelsOn; store.set("sisyphus.wheels", wheelsOn);
-  chair.root.visible = wheelsOn;
-
+  rideMode = RIDES[(RIDES.indexOf(rideMode) + 1) % RIDES.length];
+  wheelsOn = rideMode !== "none"; store.set("sisyphus.ride", rideMode);
+  chair.root.visible = rideMode === "chair"; trike.root.visible = rideMode === "trike";
 }
 
 function slip() {
@@ -1553,30 +1557,79 @@ const chair = (() => {
     wheels.push({ caster, axle });
   }
   root.scale.setScalar(K);
-  root.visible = wheelsOn;
+  root.visible = rideMode === "chair";
   scene.add(root);
   return { root, tilt, wheels, yaw: 0, spin: 0 };
+})();
+// A child's red tricycle. Front is +x.
+const trike = (() => {
+  const red = cloth(0xc0282a, 0.4), chrome = cloth(0xd0d2d6, 0.25, { metalness: 0.9 }), tyre = cloth(0x141416, 0.7), white = cloth(0xeeeae2, 0.6);
+  const root = new THREE.Group();
+  const mk = (geo, m, parent, x, y, z) => { const o = new THREE.Mesh(geo, m); o.position.set(x, y, z); o.castShadow = true; o.receiveShadow = true; parent.add(o); return o; };
+  const tube = (parent, m, ax, ay, az, bx, by, bz, r) => {     // a rod from a to b
+    const a = new THREE.Vector3(ax, ay, az), b = new THREE.Vector3(bx, by, bz), L = a.distanceTo(b);
+    const o = mk(new THREE.CylinderGeometry(r, r, L, 10), m, parent, (ax + bx) / 2, (ay + by) / 2, (az + bz) / 2);
+    o.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), b.sub(a).normalize());
+    return o;
+  };
+  const wheel = (parent, r, x, y, z) => {
+    const w = new THREE.Group(); w.position.set(x, y, z); parent.add(w);
+    mk(new THREE.TorusGeometry(r, r * 0.13, 8, 24), tyre, w, 0, 0, 0);
+    mk(new THREE.CylinderGeometry(r * 0.25, r * 0.25, r * 0.3, 12), white, w, 0, 0, 0).rotation.x = Math.PI / 2;
+    for (let k = 0; k < 6; k++) { const a = k / 6 * Math.PI; tube(w, chrome, -Math.cos(a) * r * 0.85, -Math.sin(a) * r * 0.85, 0, Math.cos(a) * r * 0.85, Math.sin(a) * r * 0.85, 0, 0.25); }
+    return w;
+  };
+  // the steering: fork, big front wheel with pedals, handlebars
+  const front = new THREE.Group(); front.position.set(24, 0, 0); root.add(front);
+  const fw = wheel(front, 13, 0, 13, 0);
+  for (const s of [-1, 1]) {
+    tube(fw, chrome, 0, 0, s * 2.5, 0, -4.5 * s, s * 4.5, 0.5);                  // cranks
+    mk(new THREE.BoxGeometry(3.5, 1, 2.5), tyre, fw, 0, -4.5 * s, s * 5.5);       // pedals
+    tube(front, red, 0, 13, s * 2.6, -3, 33, s * 2.6, 0.9);                       // fork legs
+  }
+  tube(front, red, -3, 33, 0, -3, 37, 0, 1.1);
+  tube(front, chrome, -3, 37, -10, -3, 37, 10, 0.7);                              // handlebar
+  for (const s of [-1, 1]) mk(new THREE.CylinderGeometry(1.1, 1.1, 4, 10), white, front, -3, 37, s * 11).rotation.x = Math.PI / 2;
+  // frame, seat and the two back wheels
+  tube(root, red, 21, 31, 0, -4, 20, 0, 1.4);
+  tube(root, red, -4, 20, 0, -16, 8, 0, 1.4);
+  tube(root, red, -16, 8, -13, -16, 8, 13, 1.1);                                  // back axle
+  mk(new THREE.BoxGeometry(12, 3, 11), red, root, -4, TRIKE_LIFT - 2.5, 0);        // seat (the boulder sits here)
+  mk(new THREE.BoxGeometry(14, 1.2, 12), tyre, root, -4, TRIKE_LIFT - 0.6, 0);
+  const rw = [wheel(root, 8, -16, 8, -13), wheel(root, 8, -16, 8, 13)];
+  root.scale.setScalar(K);
+  root.visible = rideMode === "trike";
+  scene.add(root);
+  return { root, front, fw, rw, yaw: 0, steer: 0, spin: 0 };
 })();
 // The rock sits on the hub with its flattest side down; the base leans with the slope and
 // turns toward the way it's going, and the casters spin
 const _cq = new THREE.Quaternion(), _cq2 = new THREE.Quaternion(), _cn = new THREE.Vector3(), _cy = new THREE.Vector3(0, 1, 0);
 function syncChair(bc, dt) {
+  const R_ = rideMode === "trike" ? trike : chair;
   const sp = Math.hypot(B.vx, B.vz);
+  let d = 0;
   if (sp > 4) {
-    let d = Math.atan2(-B.vz, B.vx) - chair.yaw;
+    d = Math.atan2(-B.vz, B.vx) - R_.yaw;
     d = Math.atan2(Math.sin(d), Math.cos(d));
-    chair.yaw += d * Math.min(1, dt * 6);
+    R_.yaw += d * Math.min(1, dt * (rideMode === "trike" ? 3 : 6));
   }
-  chair.spin += sp * dt / 2.6;
+  R_.spin += sp * dt;
   const g = meshGrad(B.x, B.z);
   _cn.set(-g.x, 1, -g.z).normalize();
   _cq.setFromUnitVectors(_cy, _cn);                                   // lean with the ground
-  _cq2.setFromAxisAngle(_cy, chair.yaw);
-  chair.root.quaternion.copy(_cq).multiply(_cq2);
-  chair.root.position.set(B.x * K, hM(B.x, B.z) * K, B.z * K);
-  for (const w of chair.wheels) w.axle.rotation.z = -chair.spin;
+  _cq2.setFromAxisAngle(_cy, R_.yaw);
+  R_.root.quaternion.copy(_cq).multiply(_cq2);
+  R_.root.position.set(B.x * K, hM(B.x, B.z) * K, B.z * K);
+  if (R_ === chair) for (const w of chair.wheels) w.axle.rotation.z = -chair.spin / 2.6;
+  else {
+    trike.steer += (clamp(d * 1.5, -0.6, 0.6) - trike.steer) * Math.min(1, dt * 8);   // the front wheel turns into the bend
+    trike.front.rotation.y = trike.steer;
+    trike.fw.rotation.z = -trike.spin / 13;
+    for (const w of trike.rw) w.rotation.z = -trike.spin / 8;
+  }
   boulder.quaternion.copy(_cq).multiply(SEAT_Q);
-  boulder.position.set(B.x * K, hM(B.x, B.z) * K, B.z * K).addScaledVector(_cn, (CHAIR_LIFT + CHAIR_SEAT) * K);
+  boulder.position.set(B.x * K, hM(B.x, B.z) * K, B.z * K).addScaledVector(_cn, (rideLift() + CHAIR_SEAT) * K);
 }
 
 // Dust particles
@@ -1805,23 +1858,32 @@ function updateDeath(dt) {
 // ---------------------------------------------------------------------------
 // Keep the head out of the boulder and put the hands on its surface
 const _hv = new THREE.Vector3(), _bw = new THREE.Vector3();
+// How far the boulder, as it's turned right now, reaches from its center toward world point p (meters)
+const _rqi = new THREE.Quaternion(), _rd = new THREE.Vector3();
+function surfaceToward(p) {
+  _rd.copy(p).sub(boulder.position);
+  const L = _rd.length() || 1;
+  _rd.divideScalar(L).applyQuaternion(_rqi.copy(boulder.quaternion).invert());
+  let m = R;
+  if (BOULDER_PTS) { m = 0; const P3 = BOULDER_PTS; for (let i = 0; i < P3.length; i += 3) { const d = P3[i] * _rd.x + P3[i + 1] * _rd.y + P3[i + 2] * _rd.z; if (d > m) m = d; } }
+  return { dist: L, surf: m * K };
+}
+// Keep the head (and its big hair) out of the boulder, and put the hands on its surface
 function fitToBoulder(bc, reach) {
   const h = hero;
-  _bw.set(bc.x * K, bc.y * K, bc.z * K);
-  const clearHead = (R + 8) * K;
   h.root.updateMatrixWorld(true);
-  const headD = () => h.head.getWorldPosition(_hv).distanceTo(_bw);
-  if (headD() < clearHead) {
+  const HEAD = 13 * K;                       // head plus hair
+  const gap = () => { const r = surfaceToward(h.head.getWorldPosition(_hv)); return r.dist - r.surf - HEAD; };
+  let g0 = gap();
+  if (g0 < 0) {
     // straighten up until the head clears it...
-    while (h.torso.rotation.x > -0.25 && headD() < clearHead) {
-      h.torso.rotation.x -= 0.04; h.torso.updateMatrixWorld(true);
-    }
+    while (h.torso.rotation.x > -0.3 && g0 < 0) { h.torso.rotation.x -= 0.04; h.torso.updateMatrixWorld(true); g0 = gap(); }
     // ...or, failing that, stand a little further back
-    const d = headD();
-    if (d < clearHead) {
+    for (let k = 0; k < 8 && g0 < 0; k++) {
       const hx = P.x - bc.x, hz = P.z - bc.z, hl = Math.hypot(hx, hz) || 1;
-      h.root.position.x += hx / hl * (clearHead - d); h.root.position.z += hz / hl * (clearHead - d);
-      h.root.updateMatrixWorld(true);
+      const step = Math.min(-g0 + 0.02, 0.5);
+      h.root.position.x += hx / hl * step; h.root.position.z += hz / hl * step;
+      h.root.updateMatrixWorld(true); g0 = gap();
     }
   }
   if (!reach) return;
@@ -1829,7 +1891,7 @@ function fitToBoulder(bc, reach) {
     let best = arm.rotation.x, be = 1e9;
     for (let a = -0.3; a >= -3.1; a -= 0.07) {
       arm.rotation.x = a; arm.updateMatrixWorld(true);
-      const e = Math.abs(hand.getWorldPosition(_hv).distanceTo(_bw) - (R + 1.5) * K);
+      const r = surfaceToward(hand.getWorldPosition(_hv)), e = Math.abs(r.dist - r.surf - 1.5 * K);
       if (e < be - 1e-4) { be = e; best = a; }
       else if (be < 3 * K) break;    // take the first place the hands meet the rock
     }
@@ -1995,13 +2057,12 @@ function showOverlay() {
       <p><kbd>Q</kbd> <kbd>E</kbd> or <kbd>←</kbd> <kbd>→</kbd> turn — steer the boulder while pushing</p>
       <p><kbd>SPACE</kbd> jump — leap back over the boulder</p>
       <p><kbd>SHIFT</kbd> duck — only for a split second, so time it</p>
-      <p><kbd>H</kbd> hood up / down &nbsp; <kbd>C</kbd> put the boulder on office-chair wheels</p>
+      <p><kbd>H</kbd> hood up / down &nbsp; <kbd>C</kbd> put the boulder on office-chair wheels, a tricycle, or nothing</p>
       <p class="small"><a href="record.html" style="color:#ffdf6b">Record your own grunts, screams and wheel sounds</a></p><br>
       <p class="small">Push it onto ground that's too steep and it slips back down on you.</p>
       <p class="small">Duck the instant it hits — or get out of its way.</p>
       <p class="small">The mountain never ends. Its face is too steep for the boulder: only the trails go up.</p>
       <p class="small">There are endless ways up, but only a few go all the way. Read the rock and choose.</p>
-      <p class="small">Read the rock — find the one that goes.</p>
       ${bestH > 0 ? `<p class="small">Highest so far: ${bestH} m</p>` : ""}
       <p class="go">Press SPACE to begin</p>
       <p class="small" style="font-size:11px;margin-top:14px">Voices: VoiceBosch (CC-BY-SA 4.0), creativeheroes, thanvannispen, JohnsonBrandEditing (CC-BY 3.0) — see CREDITS.md</p>`;
