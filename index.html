@@ -131,7 +131,58 @@ function noise(dur, vol = 0.3, freq = 400, delay = 0) {
   src.connect(f).connect(g).connect(ac.destination);
   src.start(ac.currentTime + delay);
 }
+// A rough human voice: a buzzy source shaped by vowel formants
+let _curve = null;
+function voice({ f, dur, vol = 0.2, vowel = [700, 1200, 2600], vib = 0, vibRate = 6, rasp = 0, breath = 0.3, attack = 0.02, delay = 0 }) {
+  const ac = AC; if (!ac) return;
+  const t0 = ac.currentTime + delay;
+  const o = ac.createOscillator(); o.type = "sawtooth";
+  // pitch contour: [[time fraction, Hz], ...]
+  o.frequency.setValueAtTime(f[0][1], t0);
+  for (const [tf, hz] of f.slice(1)) o.frequency.linearRampToValueAtTime(hz, t0 + tf * dur);
+  if (vib) {
+    const lfo = ac.createOscillator(), lg = ac.createGain();
+    lfo.frequency.value = vibRate; lg.gain.value = vib;
+    lfo.connect(lg).connect(o.frequency); lfo.start(t0); lfo.stop(t0 + dur + 0.05);
+  }
+  let src = o;
+  if (rasp) {   // a bit of distortion for a strained, throaty sound
+    if (!_curve) { _curve = new Float32Array(1024); for (let i = 0; i < 1024; i++) { const x = i / 512 - 1; _curve[i] = Math.tanh(x * 4); } }
+    const ws = ac.createWaveShaper(); ws.curve = _curve;
+    const pre = ac.createGain(); pre.gain.value = 1 + rasp * 3;
+    o.connect(pre).connect(ws); src = ws;
+  }
+  const env = ac.createGain();
+  env.gain.setValueAtTime(0.0001, t0);
+  env.gain.exponentialRampToValueAtTime(vol, t0 + attack);
+  env.gain.setValueAtTime(vol, t0 + dur * 0.7);
+  env.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
+  vowel.forEach((fq, i) => {
+    const bp = ac.createBiquadFilter(); bp.type = "bandpass"; bp.frequency.value = fq; bp.Q.value = 6;
+    const g = ac.createGain(); g.gain.value = [1, 0.6, 0.3][i] * 3;
+    src.connect(bp).connect(g).connect(env);
+  });
+  // breath
+  const len = Math.floor(ac.sampleRate * dur), buf = ac.createBuffer(1, len, ac.sampleRate), d = buf.getChannelData(0);
+  for (let i = 0; i < len; i++) d[i] = Math.random() * 2 - 1;
+  const ns = ac.createBufferSource(); ns.buffer = buf;
+  const nb = ac.createBiquadFilter(); nb.type = "bandpass"; nb.frequency.value = vowel[1]; nb.Q.value = 1.5;
+  const ng = ac.createGain(); ng.gain.value = breath;
+  ns.connect(nb).connect(ng).connect(env);
+  env.connect(ac.destination);
+  o.start(t0); o.stop(t0 + dur + 0.05); ns.start(t0);
+}
 const sfx = {
+  grunt(effort) {   // effort 0..1: how hard the push is
+    const p = 95 + Math.random() * 25 + effort * 20;
+    voice({ f: [[0, p * 1.15], [0.3, p], [1, p * 0.8]], dur: 0.22 + Math.random() * 0.12 + effort * 0.12,
+            vol: 0.16 + effort * 0.08, vowel: [520, 1050, 2400], rasp: 0.5 + effort * 0.5, breath: 0.5, attack: 0.03 });
+  },
+  scream() {
+    const p = 380 + Math.random() * 60;
+    voice({ f: [[0, p], [0.12, p * 2], [0.55, p * 1.85], [1, p * 1.1]], dur: 1.5, vol: 0.28,
+            vowel: [850, 1300, 2900], vib: 30, vibRate: 7, rasp: 0.8, breath: 0.25, attack: 0.04 });
+  },
   crush() { noise(0.6, 0.6, 300); tone(90, 0.5, "sawtooth", 0.2, 30);
             for (let i = 0; i < 5; i++) noise(0.05, 0.5, 2500, 0.03 + i * 0.045); },
   splat() { noise(0.4, 0.45, 600, 0.05); tone(160, 0.3, "sine", 0.15, 50, 0.05); },
@@ -509,7 +560,7 @@ function spawn(x, u) {
   B = { x: bx, z: bz, vx: 0, vz: 0, teeterT: -1, loose: false, q: B ? B.q : new THREE.Quaternion() };
   P = { x: px, z: pz, jy: 0, vy: 0,
         duckT: 0, duckCD: 0, impactT: -1, under: false, contact: false, pushing: false,
-        moving: 0, phase: 0, crushed: false, yaw: h, heading: h, fx: ux, fz: uz };
+        moving: 0, phase: 0, crushed: false, gruntT: 0.12, yaw: h, heading: h, fx: ux, fz: uz };
   death = null; clearGore();
   shake = 0; flash = 0;
   state = "play";
@@ -544,6 +595,7 @@ function slip() {
 function crush() {
   state = "crushed"; P.crushed = true; flash = 1; shake = 22;
   stats.deaths++; store.set("sisyphus.bestHeight", bestH);
+  sfx.scream();
   sfx.crush();
   startDeath();
 }
@@ -617,6 +669,15 @@ function update(dt) {
   const holding = canAct && touching && il === 0 && rollsIntoMe;
   P.contact = (pushing || holding) && !steep;
   P.pushing = pushing && !steep;
+  // he grunts with the effort: as he starts to push, then every step or two
+  if (P.pushing) {
+    P.gruntT -= dt;
+    if (P.gruntT <= 0) {
+      const effort = clamp((g.x * dx + g.z * dz) * 2.5, 0, 1);
+      sfx.grunt(effort);
+      P.gruntT = lerp(1.6, 0.8, effort) + Math.random() * 0.6;
+    }
+  } else P.gruntT = Math.min(P.gruntT, 0.12);
   P.moving = 0;
   if ((pushing || holding) && steep) slip();
 
