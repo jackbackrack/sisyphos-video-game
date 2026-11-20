@@ -164,25 +164,27 @@ function loadUserClips() {
         try {
           if (!mine[c.kind]) continue;
           const b = await AC.decodeAudioData(await c.blob.arrayBuffer());
-          if (c.kind === "wheels" || c.kind === "rumble" || c.kind === "hooves") {   // blend the ends so it loops without a click
-            const d = b.getChannelData(0), f = Math.min(Math.floor(b.sampleRate * 0.12), d.length >> 2), n = d.length;
-            for (let i = 0; i < f; i++) { const t = i / f; d[i] = d[i] * t + d[n - f + i] * (1 - t); }
-          }
-          mine[c.kind].push(b);
+          mine[c.kind].push(c.kind === "grunt" || c.kind === "scream" ? b : loopable(b));
         } catch (e) {}
       }
       for (const k in mine) if (mine[k].length) { mine[k].mine = true; clips[k] = mine[k]; }
     };
   };
 }
+// Blend a loop's end into its start so it repeats without a click
+function loopable(b) {
+  const d = b.getChannelData(0), f = Math.min(Math.floor(b.sampleRate * 0.12), d.length >> 2), n = d.length;
+  for (let i = 0; i < f; i++) { const t = i / f; d[i] = d[i] * t + d[n - f + i] * (1 - t); }
+  return b;
+}
 function loadClips() {
   if (clipsLoading || !AC || !window.VOICE) return;
   clipsLoading = true;
   loadUserClips();
-  for (const kind of ["grunt", "scream"]) VOICE[kind].forEach((b64, i) => {
+  for (const kind of ["grunt", "scream", "rumble", "wheels", "hooves"]) (VOICE[kind] || []).forEach((b64, i) => {
     const bin = atob(b64), bytes = new Uint8Array(bin.length);
     for (let k = 0; k < bin.length; k++) bytes[k] = bin.charCodeAt(k);
-    AC.decodeAudioData(bytes.buffer, buf => { if (!clips[kind].mine) clips[kind][i] = buf; }, () => {});
+    AC.decodeAudioData(bytes.buffer, buf => { if (!clips[kind].mine) clips[kind][i] = kind === "grunt" || kind === "scream" ? buf : loopable(buf); }, () => {});
   });
 }
 // Looping sounds while the boulder moves: the office-chair wheels, or the rock itself

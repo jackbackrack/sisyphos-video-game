@@ -7,7 +7,7 @@
 `assets/horse_a.png`, `assets/horse_b.png` (also in `vendor/horses.js`): cut out of photos of two toy horses supplied by the game's author.
 
 ## Voice
-`assets/voice/` (also embedded in `vendor/voice-sounds.js`): grunts and screams recorded for this game with `record.html`.
+`assets/voice/` (also embedded in `vendor/voice-sounds.js`): grunts, a scream, and the boulder rumble, office-chair wheel and horse loops, all recorded for this game with `record.html`.
 
 ## Library
 Three.js r128 (`vendor/three.min.js`), MIT license.
